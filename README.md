@@ -138,3 +138,11 @@ Runs the full suite: `HookExe.Tests.ps1`, `WatcherCore.Tests.ps1`, `OrphanCleanu
 - **Marker sometimes gets overwritten right after it appears:** check `~/.claude/tools/claudeattention.log` for a `WARNING: CLAUDE_CODE_DISABLE_TERMINAL_TITLE=...` line — if present, the env var isn't taking effect (possibly a Claude Code regression; see the GitHub issue linked above).
 - **No sound:** confirm `soundEnabled` is `true` in `config.json`, and that the selected sound file exists. Run `test-sound.ps1` to check independently of the watcher. Check the per-session watcher log at `%LOCALAPPDATA%\ClaudeTabNotifier\state\_watcherlog_<WT_SESSION>.txt` for `sound SKIPPED`/`sound FAILED` lines.
 - **General diagnosis:** every watcher session writes its own log to `%LOCALAPPDATA%\ClaudeTabNotifier\state\_watcherlog_<WT_SESSION>.txt`, and the cross-session cleanup sweep logs to `_cleanup.log` in the same folder. The hook itself logs every invocation to `~/.claude/tools/claudeattention.log`.
+
+## License
+
+This project is distributed under the **MIT License** — see the [LICENSE](LICENSE) file at the repository root for the full text.
+
+### Disclaimer
+
+The software is provided "AS IS", without warranties of any kind, express or implied. There is no guarantee that it will be error-free or suitable for every environment. Use of the software is at your own risk. Please see the included MIT License for the applicable license terms.
