@@ -51,10 +51,45 @@ function ConvertTo-QuotedArgString {
     ($Parts | ForEach-Object { '"' + $_ + '"' }) -join ' '
 }
 
-function Invoke-InstallScript {
+function New-StagedInstallScript {
+    # Simulates a real "downloaded GitHub ZIP" install: copies install.ps1
+    # and everything it deploys (watcher-background.ps1, test-sound.ps1,
+    # sounds\, config.json) into an isolated staging directory. install.ps1
+    # locates all of these via $PSScriptRoot, which resolves to wherever the
+    # invoked script FILE itself lives -- so running this staged copy makes
+    # its Copy-Item calls read from these staged (taggable) sources instead
+    # of the real repo files. A synthetic Mark-of-the-Web tag applied here
+    # therefore never touches the real watcher-background.ps1/test-sound.ps1
+    # that every other test file in this suite invokes directly.
     param($Sandbox)
+    $stageDir = Join-Path $Sandbox.Root 'stage'
+    New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
+    Copy-Item -Path $installScript -Destination (Join-Path $stageDir 'install.ps1') -Force
+    Copy-Item -Path (Join-Path $projectRoot 'watcher-background.ps1') -Destination (Join-Path $stageDir 'watcher-background.ps1') -Force
+    Copy-Item -Path (Join-Path $projectRoot 'test-sound.ps1') -Destination (Join-Path $stageDir 'test-sound.ps1') -Force
+    Copy-Item -Path (Join-Path $projectRoot 'config.json') -Destination (Join-Path $stageDir 'config.json') -Force
+    Copy-Item -Path (Join-Path $projectRoot 'sounds') -Destination (Join-Path $stageDir 'sounds') -Recurse -Force
+    Join-Path $stageDir 'install.ps1'
+}
+
+function Add-MarkOfTheWeb {
+    # Simulates the Zone.Identifier NTFS alternate data stream ("Mark of the
+    # Web") Windows stamps on every file extracted from a downloaded ZIP.
+    # Confirmed empirically on a real GitHub-ZIP install: [ZoneTransfer] /
+    # ZoneId=3 is exactly what a real downloaded+extracted file carries.
+    param([string]$Path)
+    Set-Content -Path $Path -Stream 'Zone.Identifier' -Value "[ZoneTransfer]`r`nZoneId=3" -Encoding ASCII
+}
+
+function Test-HasMarkOfTheWeb {
+    param([string]$Path)
+    $null -ne (Get-Item -Path $Path -Stream 'Zone.Identifier' -ErrorAction SilentlyContinue)
+}
+
+function Invoke-InstallScript {
+    param($Sandbox, [string]$InstallScriptPath = $installScript)
     $argString = ConvertTo-QuotedArgString @(
-        '-NoProfile', '-File', $installScript,
+        '-NoProfile', '-File', $InstallScriptPath,
         '-DeployDir', $Sandbox.DeployDir,
         '-SettingsPath', $Sandbox.SettingsPath,
         '-ToolsDir', $Sandbox.ToolsDir,
@@ -271,5 +306,44 @@ Describe "Uninstaller: nothing installed yet" {
         (Invoke-UninstallScript -Sandbox $sandbox) | Should Be 0
         Test-Path $sandbox.SettingsPath | Should Be $false
         Test-Path $sandbox.ProfilePath | Should Be $false
+    }
+}
+
+Describe "Installer: strips Mark of the Web from a downloaded-ZIP install" {
+    # Regression test for a real bug found via an actual install from a
+    # downloaded GitHub ZIP: RemoteSigned (a common execution policy) refuses
+    # to run an internet-zone-tagged, unsigned .ps1, so the watcher silently
+    # failed to auto-start with "is not digitally signed". install.ps1 now
+    # runs Unblock-File on everything it deploys.
+    BeforeEach {
+        $sandbox = New-InstallSandbox
+        $stagedInstallScript = New-StagedInstallScript -Sandbox $sandbox
+        $stageDir = Split-Path $stagedInstallScript -Parent
+        $stagedWatcher = Join-Path $stageDir 'watcher-background.ps1'
+        $stagedTestSound = Join-Path $stageDir 'test-sound.ps1'
+        Add-MarkOfTheWeb -Path $stagedWatcher
+        Add-MarkOfTheWeb -Path $stagedTestSound
+        Add-MarkOfTheWeb -Path $sandbox.FakeExePath
+    }
+    AfterEach { Remove-InstallSandbox $sandbox }
+
+    It "sanity check: the staged source files are actually tagged before install" {
+        (Test-HasMarkOfTheWeb -Path $stagedWatcher) | Should Be $true
+        (Test-HasMarkOfTheWeb -Path $stagedTestSound) | Should Be $true
+        (Test-HasMarkOfTheWeb -Path $sandbox.FakeExePath) | Should Be $true
+    }
+
+    It "deploys watcher-background.ps1, test-sound.ps1, and the exe without the Mark of the Web tag" {
+        (Invoke-InstallScript -Sandbox $sandbox -InstallScriptPath $stagedInstallScript) | Should Be 0
+
+        $deployedWatcher = Join-Path $sandbox.DeployDir 'watcher-background.ps1'
+        $deployedTestSound = Join-Path $sandbox.DeployDir 'test-sound.ps1'
+        Test-Path $deployedWatcher | Should Be $true
+        Test-Path $deployedTestSound | Should Be $true
+        Test-Path $sandbox.ExeDeployPath | Should Be $true
+
+        (Test-HasMarkOfTheWeb -Path $deployedWatcher) | Should Be $false
+        (Test-HasMarkOfTheWeb -Path $deployedTestSound) | Should Be $false
+        (Test-HasMarkOfTheWeb -Path $sandbox.ExeDeployPath) | Should Be $false
     }
 }

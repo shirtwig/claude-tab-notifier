@@ -63,6 +63,7 @@ if ($SourceExePath) {
     }
     New-Item -ItemType Directory -Path $toolsDir -Force | Out-Null
     Copy-Item -Path $SourceExePath -Destination $exeDeployPath -Force
+    Unblock-File -Path $exeDeployPath
     Write-Host "  deployed: $exeDeployPath"
     Write-Host ""
 } else {
@@ -88,6 +89,7 @@ if ($SourceExePath) {
 
     New-Item -ItemType Directory -Path $toolsDir -Force | Out-Null
     Copy-Item -Path $publishedExe -Destination $exeDeployPath -Force
+    Unblock-File -Path $exeDeployPath
     Write-Host "  deployed: $exeDeployPath"
     Write-Host ""
 }
@@ -113,6 +115,19 @@ if (-not (Test-Path $deployedConfigPath)) {
 } else {
     Write-Host "  config.json already exists at deployment location -- left untouched (preserves any customization)"
 }
+
+# A user who installs from a downloaded GitHub ZIP (rather than a git clone)
+# gets every extracted file tagged with Windows' "Mark of the Web" (a
+# Zone.Identifier NTFS stream, ZoneId=3 "Internet"). Copy-Item preserves that
+# tag onto the deployed copies. Under the common RemoteSigned execution
+# policy, an internet-zone-tagged .ps1 must be signed to run -- ours isn't,
+# so the watcher would silently fail to auto-start with "is not digitally
+# signed" (confirmed via a real install from a downloaded ZIP). Unblock-File
+# strips that tag from everything just deployed; it's a safe no-op on files
+# that were never tagged (e.g. a git-clone install), and does not touch the
+# user's system-wide execution policy at all.
+Get-ChildItem -Path $deployDir -Recurse -File | Unblock-File
+Write-Host "  unblocked deployed files (removes 'Mark of the Web' from a downloaded ZIP, if present)"
 Write-Host ""
 
 # --- 3. merge into settings.json (hooks + env), with manifest tracking for the env key ---
