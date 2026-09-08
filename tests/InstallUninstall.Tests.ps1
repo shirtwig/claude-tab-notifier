@@ -87,8 +87,29 @@ function Test-HasMarkOfTheWeb {
 }
 
 function Invoke-InstallScript {
-    param($Sandbox, [string]$InstallScriptPath = $installScript)
-    $argString = ConvertTo-QuotedArgString @(
+    # -SkipSoundPrompt by default -- this and every other existing test in this
+    # file predates the interactive sound-selection step and runs with no stdin
+    # redirected, so without this the new Read-Host prompt would hang forever.
+    # The dedicated sound-selection tests below override sound-related behavior
+    # explicitly (either -SelectedSound, or simulated keystrokes via -InputLines)
+    # instead of relying on this default.
+    #
+    # Uses System.Diagnostics.Process directly (like TestHelpers.psm1's
+    # Start-IsolatedProcess) rather than the Start-Process cmdlet: Start-Process
+    # -PassThru without -Wait was observed to return a Process object whose
+    # .ExitCode comes back blank even after WaitForExit() succeeds -- a known
+    # quirk of that specific combination, not present when using Process
+    # directly, which also gives clean, real StandardInput access for feeding
+    # simulated answers to Read-Host.
+    # -InputLines is compared via $null (not plain truthiness) throughout --
+    # PowerShell unwraps a SINGLE-element array in a boolean test and evaluates
+    # that one element's own truthiness instead of the array's Count, so
+    # -InputLines @('') (used to simulate pressing Enter) would otherwise be
+    # treated as "not given" (empty string is falsy) and silently skip stdin
+    # redirection entirely -- observed empirically as a 30s hang, since the
+    # child then waits on the real ambient console instead.
+    param($Sandbox, [string]$InstallScriptPath = $installScript, [switch]$SkipSoundPrompt = $true, [string]$SelectedSound = $null, [string[]]$InputLines = $null)
+    $argParts = @(
         '-NoProfile', '-File', $InstallScriptPath,
         '-DeployDir', $Sandbox.DeployDir,
         '-SettingsPath', $Sandbox.SettingsPath,
@@ -96,8 +117,75 @@ function Invoke-InstallScript {
         '-ProfilePath', $Sandbox.ProfilePath,
         '-SourceExePath', $Sandbox.FakeExePath
     )
-    $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argString -NoNewWindow -PassThru -Wait
+    if ($SelectedSound) {
+        $argParts += @('-SelectedSound', $SelectedSound)
+    } elseif ($SkipSoundPrompt -and ($null -eq $InputLines)) {
+        $argParts += '-SkipSoundPrompt'
+    }
+    $argString = ConvertTo-QuotedArgString $argParts
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = 'powershell.exe'
+    $psi.Arguments = $argString
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    if ($null -ne $InputLines) { $psi.RedirectStandardInput = $true }
+
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    if ($null -ne $InputLines) {
+        # A fresh StreamWriter over the SAME underlying pipe, with UTF8
+        # encoding WITHOUT a BOM preamble -- $proc.StandardInput's own default
+        # encoding was observed to emit a BOM before the first write, which
+        # corrupted the first simulated line (e.g. "3" arrived as "<BOM>3",
+        # failing [int]::TryParse) and threw off every answer after it.
+        # ProcessStartInfo.StandardInputEncoding isn't available on this .NET
+        # Framework version, hence wrapping the stream manually instead.
+        $noBomUtf8 = New-Object System.Text.UTF8Encoding($false)
+        $writer = New-Object System.IO.StreamWriter($proc.StandardInput.BaseStream, $noBomUtf8)
+        $writer.AutoFlush = $true
+        # A small delay between lines (not just before the first one) --
+        # writing all lines back-to-back immediately after Process.Start(),
+        # before the child's own Read-Host loop has reached its first prompt,
+        # was observed to intermittently lose the first queued line (the
+        # child's console-input setup appears to discard whatever was already
+        # buffered in the pipe at that point, rather than queuing it for the
+        # first ReadLine). Pacing each write after a short wait avoids the race.
+        foreach ($line in $InputLines) {
+            Start-Sleep -Milliseconds 400
+            $writer.WriteLine($line)
+        }
+        $writer.Close()
+    }
+
+    # Timeout, not an unbounded wait: a bug in the (new, interactive)
+    # sound-selection flow that ends up blocking on Read-Host must fail the
+    # test loudly instead of hanging the whole Pester run forever.
+    if (-not $proc.WaitForExit(30000)) {
+        try { $proc.Kill() } catch {}
+        return -999
+    }
     $proc.ExitCode
+}
+
+function Invoke-InstallScriptInteractive {
+    # A throwaway dummy line is always prepended: whatever is written FIRST to
+    # the child's redirected stdin was observed, empirically and consistently,
+    # to arrive at the child's very first Read-Host call corrupted into a few
+    # bytes of encoding-preamble garbage (non-whitespace, unparsable as a
+    # number) -- reproduced in isolation independent of the encoding used to
+    # write it, so it is some property of how .NET's Process class sets up a
+    # redirected-stdin pipe, not this code's own encoding choice. Every line
+    # written AFTER that first one arrives perfectly intact. install.ps1's own
+    # loop already treats an unparsable answer as "invalid, try again" and
+    # re-prompts, so the dummy line costs one harmless extra iteration and the
+    # real -InputLines answers below it all land correctly.
+    param($Sandbox, [string[]]$InputLines)
+    Invoke-InstallScript -Sandbox $Sandbox -SkipSoundPrompt:$false -InputLines (@('') + $InputLines)
+}
+
+function Get-DeployedConfig {
+    param($Sandbox)
+    Get-Content (Join-Path $Sandbox.DeployDir 'config.json') -Raw | ConvertFrom-Json
 }
 
 function Invoke-UninstallScript {
@@ -345,5 +433,115 @@ Describe "Installer: strips Mark of the Web from a downloaded-ZIP install" {
         (Test-HasMarkOfTheWeb -Path $deployedWatcher) | Should Be $false
         (Test-HasMarkOfTheWeb -Path $deployedTestSound) | Should Be $false
         (Test-HasMarkOfTheWeb -Path $sandbox.ExeDeployPath) | Should Be $false
+    }
+}
+
+$allSoundKeys = @('classic','chime','soft','alert','retro','magic','digital','double','scifi','success')
+
+function Set-PreDeployedConfig {
+    # Seeds a config.json at the deploy location BEFORE install.ps1 runs, so
+    # the installer's own "config.json already exists -- left untouched" logic
+    # (step 2) leaves it in place for the sound-selection step (step 3) to read
+    # -- exactly what a real re-install against a customized config looks like.
+    param($Sandbox, [string]$SelectedSound = 'classic', [bool]$SoundEnabled = $true, [string]$CustomSoundFile = '')
+    New-Item -ItemType Directory -Path $Sandbox.DeployDir -Force | Out-Null
+    $cfg = @{ soundEnabled = $SoundEnabled; selectedSound = $SelectedSound; customSoundFile = $CustomSoundFile }
+    ($cfg | ConvertTo-Json -Compress) | Set-Content -Path (Join-Path $Sandbox.DeployDir 'config.json') -Encoding utf8
+}
+
+Describe "Installer: sound selection" {
+    BeforeEach { $sandbox = New-InstallSandbox }
+    AfterEach { Remove-InstallSandbox $sandbox }
+
+    foreach ($soundName in $allSoundKeys) {
+        It "-SelectedSound '$soundName' sets selectedSound directly, no prompt" {
+            (Invoke-InstallScript -Sandbox $sandbox -SelectedSound $soundName) | Should Be 0
+            (Get-DeployedConfig -Sandbox $sandbox).selectedSound | Should Be $soundName
+        }
+    }
+
+    It "an unrecognized -SelectedSound is rejected and falls back to the current/default value" {
+        (Invoke-InstallScript -Sandbox $sandbox -SelectedSound 'not-a-real-sound') | Should Be 0
+        (Get-DeployedConfig -Sandbox $sandbox).selectedSound | Should Be 'classic'
+    }
+
+    It "a fresh install with no sound choice at all defaults to classic (-SkipSoundPrompt)" {
+        (Invoke-InstallScript -Sandbox $sandbox) | Should Be 0
+        (Get-DeployedConfig -Sandbox $sandbox).selectedSound | Should Be 'classic'
+    }
+
+    It "interactive: a valid numeric choice, then confirming yes, selects that sound" {
+        # "3" = soft, "" (blank) = confirm yes
+        (Invoke-InstallScriptInteractive -Sandbox $sandbox -InputLines @('3', '')) | Should Be 0
+        (Get-DeployedConfig -Sandbox $sandbox).selectedSound | Should Be 'soft'
+    }
+
+    It "interactive: an invalid number is rejected and re-prompts instead of crashing" {
+        # "55" invalid -> re-prompted -> "3" = soft -> "" confirm yes
+        (Invoke-InstallScriptInteractive -Sandbox $sandbox -InputLines @('55', '3', '')) | Should Be 0
+        (Get-DeployedConfig -Sandbox $sandbox).selectedSound | Should Be 'soft'
+    }
+
+    It "interactive: answering 'no' to the confirmation re-prompts instead of saving that choice" {
+        # "3" = soft, "n" = reject it, "5" = retro, "" = confirm yes
+        (Invoke-InstallScriptInteractive -Sandbox $sandbox -InputLines @('3', 'n', '5', '')) | Should Be 0
+        (Get-DeployedConfig -Sandbox $sandbox).selectedSound | Should Be 'retro'
+    }
+
+    It "interactive: pressing Enter with no prior config keeps the classic default" {
+        (Invoke-InstallScriptInteractive -Sandbox $sandbox -InputLines @('')) | Should Be 0
+        (Get-DeployedConfig -Sandbox $sandbox).selectedSound | Should Be 'classic'
+    }
+
+    It "interactive: pressing Enter on a re-install preserves the existing selectedSound" {
+        (Invoke-InstallScript -Sandbox $sandbox -SelectedSound 'magic') | Should Be 0
+        (Invoke-InstallScriptInteractive -Sandbox $sandbox -InputLines @('')) | Should Be 0
+        (Get-DeployedConfig -Sandbox $sandbox).selectedSound | Should Be 'magic'
+    }
+
+    It "a plain -SkipSoundPrompt re-install preserves the existing selectedSound too" {
+        (Invoke-InstallScript -Sandbox $sandbox -SelectedSound 'success') | Should Be 0
+        (Invoke-InstallScript -Sandbox $sandbox) | Should Be 0
+        (Get-DeployedConfig -Sandbox $sandbox).selectedSound | Should Be 'success'
+    }
+
+    It "does not change soundEnabled when only selectedSound is chosen" {
+        Set-PreDeployedConfig -Sandbox $sandbox -SelectedSound 'classic' -SoundEnabled $false
+        (Invoke-InstallScript -Sandbox $sandbox -SelectedSound 'chime') | Should Be 0
+        $cfg = Get-DeployedConfig -Sandbox $sandbox
+        $cfg.selectedSound | Should Be 'chime'
+        $cfg.soundEnabled | Should Be $false
+    }
+
+    It "does not touch customSoundFile when switching away from 'custom'" {
+        Set-PreDeployedConfig -Sandbox $sandbox -SelectedSound 'custom' -CustomSoundFile 'C:\custom\ping.wav'
+        (Invoke-InstallScript -Sandbox $sandbox -SelectedSound 'retro') | Should Be 0
+        $cfg = Get-DeployedConfig -Sandbox $sandbox
+        $cfg.selectedSound | Should Be 'retro'
+        $cfg.customSoundFile | Should Be 'C:\custom\ping.wav'
+    }
+
+    It "keeps 'custom' and customSoundFile untouched when the prompt is skipped" {
+        Set-PreDeployedConfig -Sandbox $sandbox -SelectedSound 'custom' -CustomSoundFile 'C:\custom\ping.wav'
+        (Invoke-InstallScript -Sandbox $sandbox) | Should Be 0
+        $cfg = Get-DeployedConfig -Sandbox $sandbox
+        $cfg.selectedSound | Should Be 'custom'
+        $cfg.customSoundFile | Should Be 'C:\custom\ping.wav'
+    }
+
+    It "a missing/corrupt deployed config.json does not crash the installer" {
+        New-Item -ItemType Directory -Path $sandbox.DeployDir -Force | Out-Null
+        Set-Content -Path (Join-Path $sandbox.DeployDir 'config.json') -Value '{ this is not valid json' -Encoding utf8
+        (Invoke-InstallScript -Sandbox $sandbox) | Should Be 0
+        Test-Path $sandbox.ExeDeployPath | Should Be $true
+    }
+
+    It "soundEnabled=false: interactive selection still works, declining the extra preview prompt" {
+        Set-PreDeployedConfig -Sandbox $sandbox -SelectedSound 'classic' -SoundEnabled $false
+        # "7" = digital, "n" = decline the extra "preview anyway?" question, "" = confirm yes
+        (Invoke-InstallScriptInteractive -Sandbox $sandbox -InputLines @('7', 'n', '')) | Should Be 0
+        $cfg = Get-DeployedConfig -Sandbox $sandbox
+        $cfg.selectedSound | Should Be 'digital'
+        $cfg.soundEnabled | Should Be $false
     }
 }

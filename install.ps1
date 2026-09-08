@@ -16,7 +16,14 @@ param(
     # When given, skips the real "dotnet publish" build and deploys this file as
     # the hook exe instead -- lets a test harness verify deployment/wiring logic
     # without requiring/paying for a real .NET build on every test run.
-    [string]$SourceExePath = $null
+    [string]$SourceExePath = $null,
+    # Sound-selection controls (both optional; default behavior for a real
+    # interactive user is unchanged -- they get prompted). -SelectedSound sets
+    # the sound directly with no prompt at all (for scripts/tests). -SkipSoundPrompt
+    # skips the prompt and keeps whatever is already configured (or the fresh
+    # default) untouched -- for unattended/automated installs.
+    [string]$SelectedSound = $null,
+    [switch]$SkipSoundPrompt
 )
 
 $ErrorActionPreference = 'Stop'
@@ -56,7 +63,7 @@ Write-Host ""
 
 # --- 1. build and deploy the hook exe ---
 if ($SourceExePath) {
-    Write-Host "[1/5] Deploying provided hook exe (build skipped: -SourceExePath given) ..." -ForegroundColor Yellow
+    Write-Host "[1/6] Deploying provided hook exe (build skipped: -SourceExePath given) ..." -ForegroundColor Yellow
     if (-not (Test-Path $SourceExePath)) {
         Write-Host "[FAIL] -SourceExePath not found: $SourceExePath" -ForegroundColor Red
         exit 1
@@ -67,7 +74,7 @@ if ($SourceExePath) {
     Write-Host "  deployed: $exeDeployPath"
     Write-Host ""
 } else {
-    Write-Host "[1/5] Building ClaudeAttention.exe ..." -ForegroundColor Yellow
+    Write-Host "[1/6] Building ClaudeAttention.exe ..." -ForegroundColor Yellow
     $dotnetCmd = Get-Command dotnet -ErrorAction SilentlyContinue
     if (-not $dotnetCmd) {
         Write-Host "[FAIL] dotnet CLI not found on PATH. Install the .NET SDK first." -ForegroundColor Red
@@ -95,7 +102,7 @@ if ($SourceExePath) {
 }
 
 # --- 2. deploy watcher, sound, config assets ---
-Write-Host "[2/5] Deploying watcher and sound assets ..." -ForegroundColor Yellow
+Write-Host "[2/6] Deploying watcher and sound assets ..." -ForegroundColor Yellow
 New-Item -ItemType Directory -Path $soundsDeployDir -Force | Out-Null
 
 Copy-Item -Path (Join-Path $PSScriptRoot 'watcher-background.ps1') -Destination (Join-Path $deployDir 'watcher-background.ps1') -Force
@@ -130,8 +137,122 @@ Get-ChildItem -Path $deployDir -Recurse -File | Unblock-File
 Write-Host "  unblocked deployed files (removes 'Mark of the Web' from a downloaded ZIP, if present)"
 Write-Host ""
 
-# --- 3. merge into settings.json (hooks + env), with manifest tracking for the env key ---
-Write-Host "[3/5] Updating Claude Code settings.json ..." -ForegroundColor Yellow
+# --- 3. choose notification sound ---
+Write-Host "[3/6] Choosing notification sound ..." -ForegroundColor Yellow
+
+$soundCatalog = [ordered]@{
+    classic = 'Classic -- two-tone chime'
+    chime   = 'Chime -- soft bell'
+    soft    = 'Soft -- gentle low tone'
+    alert   = 'Alert -- sharp double pulse'
+    retro   = 'Retro -- square-wave beep'
+    magic   = 'Magic -- ascending arpeggio'
+    digital = 'Digital -- quick double blip'
+    double  = 'Double -- double beep'
+    scifi   = 'Sci-Fi -- frequency sweep'
+    success = 'Success -- victory fanfare'
+}
+$soundKeys = @($soundCatalog.Keys)
+$testSoundPath = Join-Path $deployDir 'test-sound.ps1'
+
+$soundConfig = $null
+try {
+    $soundConfig = Get-Content $deployedConfigPath -Raw | ConvertFrom-Json
+} catch {
+    Write-Host "  config.json is missing or invalid -- using defaults for sound selection" -ForegroundColor DarkYellow
+}
+if ($null -eq $soundConfig) {
+    $soundConfig = [PSCustomObject]@{ soundEnabled = $true; selectedSound = 'classic'; customSoundFile = '' }
+}
+if (-not $soundConfig.PSObject.Properties['selectedSound'] -or -not $soundConfig.selectedSound) {
+    $soundConfig | Add-Member -MemberType NoteProperty -Name 'selectedSound' -Value 'classic' -Force
+}
+
+$currentSelected = $soundConfig.selectedSound
+if (-not ($soundKeys -contains $currentSelected) -and $currentSelected -ne 'custom') {
+    $currentSelected = 'classic'
+}
+$soundEnabledForPreview = $true
+if ($soundConfig.PSObject.Properties['soundEnabled']) { $soundEnabledForPreview = [bool]$soundConfig.soundEnabled }
+
+$finalSound = $currentSelected
+
+if ($SelectedSound) {
+    if ($soundKeys -contains $SelectedSound) {
+        $finalSound = $SelectedSound
+        Write-Host "  sound set via -SelectedSound: $finalSound"
+    } else {
+        Write-Host "  -SelectedSound '$SelectedSound' is not a recognized sound name -- keeping '$currentSelected'" -ForegroundColor DarkYellow
+    }
+} elseif ($SkipSoundPrompt) {
+    Write-Host "  sound prompt skipped (-SkipSoundPrompt) -- keeping '$currentSelected'"
+} else {
+    # No pre-check via [Console]::In.Peek() here on purpose -- Peek() reads
+    # ahead into .NET's own Console.In buffer, which was observed to steal
+    # bytes that Read-Host's own (separate) read path never sees afterward,
+    # corrupting the very first prompt's answer. A try/catch around the whole
+    # loop is the safe net instead: Read-Host throws a HostException on a
+    # genuinely non-interactive host (e.g. -NonInteractive, no console at
+    # all), which is caught below and falls back to keeping the current value.
+    try {
+        while ($true) {
+            Write-Host ""
+            Write-Host "  Choose a notification sound:"
+            for ($i = 0; $i -lt $soundKeys.Count; $i++) {
+                $key = $soundKeys[$i]
+                $marker = if ($key -eq $currentSelected) { '  (current)' } else { '' }
+                Write-Host ("    {0,2}. {1}{2}" -f ($i + 1), $soundCatalog[$key], $marker)
+            }
+            $raw = Read-Host "  Enter a number (1-$($soundKeys.Count)), or press Enter to keep '$currentSelected'"
+            if ([string]::IsNullOrWhiteSpace($raw)) {
+                $finalSound = $currentSelected
+                break
+            }
+
+            $choiceNum = 0
+            if (-not [int]::TryParse($raw.Trim(), [ref]$choiceNum) -or $choiceNum -lt 1 -or $choiceNum -gt $soundKeys.Count) {
+                Write-Host "    Not a valid choice -- enter a number from 1 to $($soundKeys.Count)." -ForegroundColor Yellow
+                continue
+            }
+
+            $candidate = $soundKeys[$choiceNum - 1]
+
+            $shouldPreview = $soundEnabledForPreview
+            if (-not $soundEnabledForPreview) {
+                $previewAnswer = Read-Host "  Sound is currently disabled. Preview '$($soundCatalog[$candidate])' anyway? (y/N)"
+                $shouldPreview = ($previewAnswer -match '^(y|yes)$')
+            }
+            if ($shouldPreview -and (Test-Path $testSoundPath)) {
+                try {
+                    & $testSoundPath -Sound $candidate | Out-Null
+                } catch {
+                    Write-Host "    (preview failed: $($_.Exception.Message))" -ForegroundColor DarkYellow
+                }
+            }
+
+            $confirmAnswer = Read-Host "  Use '$($soundCatalog[$candidate])' for notifications? (Y/n)"
+            if ($confirmAnswer -match '^(n|no)$') { continue }
+
+            $finalSound = $candidate
+            break
+        }
+    } catch {
+        Write-Host "  no interactive input available -- keeping '$currentSelected'" -ForegroundColor DarkYellow
+        $finalSound = $currentSelected
+    }
+}
+
+if ($finalSound -ne $soundConfig.selectedSound) {
+    $soundConfig.selectedSound = $finalSound
+    $soundConfig | ConvertTo-Json -Depth 5 | Set-Content -Path $deployedConfigPath -Encoding utf8
+    Write-Host "  selectedSound set to '$finalSound'"
+} else {
+    Write-Host "  selectedSound unchanged ('$finalSound')"
+}
+Write-Host ""
+
+# --- 4. merge into settings.json (hooks + env), with manifest tracking for the env key ---
+Write-Host "[4/6] Updating Claude Code settings.json ..." -ForegroundColor Yellow
 
 $settings = $null
 if (Test-Path $settingsPath) {
@@ -227,8 +348,8 @@ if ($hooksChanged -or $envChanged) {
 $manifest | ConvertTo-Json -Depth 5 | Set-Content -Path $manifestPath -Encoding utf8
 Write-Host ""
 
-# --- 4. add watcher auto-start to $PROFILE ---
-Write-Host "[4/5] Updating PowerShell profile ..." -ForegroundColor Yellow
+# --- 5. add watcher auto-start to $PROFILE ---
+Write-Host "[5/6] Updating PowerShell profile ..." -ForegroundColor Yellow
 
 $profileBlockLines = @(
     $profileMarkerStart,
@@ -268,8 +389,8 @@ if (-not $profileHasMarker) {
 }
 Write-Host ""
 
-# --- 5. verify ---
-Write-Host "[5/5] Verifying installation ..." -ForegroundColor Yellow
+# --- 6. verify ---
+Write-Host "[6/6] Verifying installation ..." -ForegroundColor Yellow
 $allOk = $true
 
 function Test-Step {
