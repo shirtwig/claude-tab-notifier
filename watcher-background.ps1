@@ -1,7 +1,11 @@
 $ErrorActionPreference = 'Stop'
 
 if (-not $env:WT_SESSION) {
-    Write-Host "No WT_SESSION -- not running inside Windows Terminal." -ForegroundColor Red
+    # Not an error: this fires on every PowerShell window that isn't a
+    # Windows Terminal pane (legacy conhost.exe shortcuts, Win+X menu, etc.),
+    # via $PROFILE's auto-start block. There's nothing for the watcher to do
+    # without WT_SESSION, and a plain user opening an unrelated PowerShell
+    # window shouldn't see any message about this project at all.
     return
 }
 

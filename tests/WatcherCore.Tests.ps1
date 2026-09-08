@@ -20,6 +20,38 @@ function Set-SandboxConfigRaw {
     Set-Content -Path $Sandbox.ConfigPath -Value $RawText -Encoding utf8
 }
 
+function Invoke-PsWatcherWithoutWtSession {
+    # Runs watcher-background.ps1 as a standalone process with WT_SESSION
+    # explicitly removed (regardless of this test-runner's own ambient value
+    # -- it has one, being a real Windows Terminal session itself), and
+    # captures stdout/stderr. Without WT_SESSION the script returns almost
+    # immediately, so plain -Command (no -NoExit) correctly lets the process
+    # exit on its own -- redirecting output is safe here specifically because
+    # nothing keeps the process alive waiting on stdin. (For the "watcher
+    # actually keeps running" case, -NoExit does NOT keep a process alive
+    # once its stdio is redirected -- confirmed empirically -- so that case
+    # is tested via the existing, proven Start-IsolatedPsWatcher instead,
+    # which never redirects anything.)
+    param($Sandbox)
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = 'powershell.exe'
+    $psi.Arguments = "-NoProfile -Command `"& '$($Sandbox.PsWatcher)'`""
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.EnvironmentVariables['LOCALAPPDATA'] = $Sandbox.LocalAppData
+    $psi.EnvironmentVariables.Remove('WT_SESSION')
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $stderr = $proc.StandardError.ReadToEnd()
+    $exited = $proc.WaitForExit(5000)
+    if (-not $exited) {
+        $Sandbox.TrackedPids.Add($proc.Id)
+    }
+    [PSCustomObject]@{ ExitCode = $(if ($exited) { $proc.ExitCode } else { $null }); Stdout = $stdout; Stderr = $stderr; Exited = $exited }
+}
+
 Describe "Watcher core behavior (PowerShell)" {
     BeforeEach {
         $sandbox = New-TestSandbox
@@ -35,6 +67,20 @@ Describe "Watcher core behavior (PowerShell)" {
         $hb.shell | Should Be 'powershell'
         ($hb.PSObject.Properties.Name -contains 'parentPid') | Should Be $true
         ($hb.PSObject.Properties.Name -contains 'time') | Should Be $true
+    }
+
+    It "without WT_SESSION: exits cleanly, prints nothing, creates no state directory" {
+        $result = Invoke-PsWatcherWithoutWtSession -Sandbox $sandbox
+        $result.Exited | Should Be $true
+        $result.ExitCode | Should Be 0
+        $result.Stdout | Should BeNullOrEmpty
+        $result.Stderr | Should BeNullOrEmpty
+        Test-Path $sandbox.StateDir | Should Be $false
+    }
+
+    It "with WT_SESSION: starts normally and creates a heartbeat (no regression from the silent-exit fix)" {
+        Start-IsolatedPsWatcher -Sandbox $sandbox -WtSession $wt | Out-Null
+        (Wait-ForHeartbeat -Sandbox $sandbox -WtSession $wt) | Should Not Be $null
     }
 
     It "MARKED -> CLEARED -> MARKED across a full cycle" {
