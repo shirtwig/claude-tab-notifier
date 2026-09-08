@@ -130,6 +130,7 @@ Invoke-StaleStateSweep -StateDir $stateDir -OwnWtSession $env:WT_SESSION -Cleanu
 $soundEnabled = $true
 $selectedSound = 'classic'
 $customSoundFile = ''
+$selectedEmoji = 'sparkle'
 $configPath = Join-Path $PSScriptRoot 'config.json'
 if (Test-Path $configPath) {
     try {
@@ -137,10 +138,32 @@ if (Test-Path $configPath) {
         if ($null -ne $config.soundEnabled) { $soundEnabled = [bool]$config.soundEnabled }
         if ($config.selectedSound) { $selectedSound = $config.selectedSound }
         if ($config.customSoundFile) { $customSoundFile = $config.customSoundFile }
+        if ($config.selectedEmoji) { $selectedEmoji = $config.selectedEmoji }
     } catch {
         Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] failed to read config.json, using defaults ($($_.Exception.Message))"
     }
 }
+
+# Emoji catalog -- identical to watcher-background.ps1's (see its comments for
+# the full rationale, including why 'heart' needs two codepoints); duplicated
+# rather than shared, consistent with how sound-resolution logic is already
+# duplicated across these scripts.
+$emojiCatalog = [ordered]@{
+    sparkle = @(0x2728)
+    star    = @(0x2B50)
+    bell    = @(0x1F514)
+    bolt    = @(0x26A1)
+    fire    = @(0x1F525)
+    target  = @(0x1F3AF)
+    check   = @(0x2705)
+    reddot  = @(0x1F534)
+    eyes    = @(0x1F440)
+    chat    = @(0x1F4AC)
+    heart   = @(0x2764, 0xFE0F)
+    music   = @(0x1F3B5)
+}
+if (-not $emojiCatalog.Contains($selectedEmoji)) { $selectedEmoji = 'sparkle' }
+$emojiChar = -join ($emojiCatalog[$selectedEmoji] | ForEach-Object { [System.Char]::ConvertFromUtf32($_) })
 if ($selectedSound -eq 'custom') {
     if ($customSoundFile -and [System.IO.Path]::IsPathRooted($customSoundFile)) {
         $soundFile = $customSoundFile
@@ -157,12 +180,31 @@ $marked = $false
 $lastStatus = $null
 $iterationCount = 0
 $selfCheckIntervalIterations = 20  # ~10s at the 500ms poll interval
+# Pulse pattern -- identical to watcher-background.ps1's (see its comments for
+# the full rationale: the closest approximation of a font-size grow/shrink
+# pulse achievable entirely within a plain console title string).
+$animPattern = @(1, 2, 3, 2)
+$animFrame = 0
 
 while ($true) {
     try {
         Start-Sleep -Milliseconds 500
         $iterationCount++
-        $heartbeatEntry = @{ time = (Get-Date -Format o); pid = $myPid; parentPid = $myParentPid; shell = 'cmd' }
+
+        # Animate every tick while marked -- see watcher-background.ps1 for
+        # the full rationale (runs before the heartbeat write so a later
+        # malformed state file can never suppress it; no per-tick log line to
+        # avoid unbounded log growth; current title recorded in the
+        # already-every-tick-overwritten heartbeat instead).
+        if ($marked) {
+            $currentTitle = ($emojiChar * $animPattern[$animFrame]) + " $originalTitle"
+            [ClaudeTabNotifier.Native]::SetConsoleTitleW($currentTitle) | Out-Null
+            $animFrame = ($animFrame + 1) % $animPattern.Count
+        } else {
+            $currentTitle = $originalTitle
+        }
+
+        $heartbeatEntry = @{ time = (Get-Date -Format o); pid = $myPid; parentPid = $myParentPid; shell = 'cmd'; title = $currentTitle }
         ($heartbeatEntry | ConvertTo-Json -Compress) | Set-Content -Path $heartbeatFile -Encoding utf8
 
         if ($iterationCount % $selfCheckIntervalIterations -eq 0) {
@@ -189,10 +231,16 @@ while ($true) {
         $lastStatus = $status
 
         if ($status -eq 'needsAttention' -and -not $marked) {
-            $sparkle = [char]0x2728
-            [ClaudeTabNotifier.Native]::SetConsoleTitleW("$sparkle $originalTitle") | Out-Null
             $marked = $true
-            Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] MARKED -> $sparkle $originalTitle"
+            $animFrame = 0
+            # Set frame 0 immediately (matching the previous immediate-set
+            # behavior) rather than waiting for the next tick's animate step
+            # above -- then prime $animFrame so the next tick continues the
+            # cycle smoothly instead of repeating frame 0.
+            $firstFrameTitle = ($emojiChar * $animPattern[0]) + " $originalTitle"
+            [ClaudeTabNotifier.Native]::SetConsoleTitleW($firstFrameTitle) | Out-Null
+            $animFrame = 1 % $animPattern.Count
+            Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] MARKED -> $firstFrameTitle"
 
             if ($soundEnabled) {
                 try {

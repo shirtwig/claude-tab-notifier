@@ -9,9 +9,23 @@ Import-Module (Join-Path $PSScriptRoot 'TestHelpers.psm1') -Force
 
 $builtInSounds = @('alert','chime','classic','digital','double','magic','retro','scifi','soft','success')
 
+# Codepoint reference for the built-in emoji catalog -- mirrors the catalogs
+# duplicated in watcher-background.ps1/watcher-cmd.ps1/install.ps1, used here
+# only to compute the expected glyph string for assertions (never to drive
+# the watcher itself, which resolves its own emoji internally from config.json).
+$emojiCodepoints = @{
+    sparkle = @(0x2728); star = @(0x2B50); bell = @(0x1F514); bolt = @(0x26A1); fire = @(0x1F525)
+    target  = @(0x1F3AF); check = @(0x2705); reddot = @(0x1F534); eyes = @(0x1F440); chat = @(0x1F4AC)
+    heart   = @(0x2764, 0xFE0F); music = @(0x1F3B5)
+}
+function Get-EmojiChar {
+    param([string]$Name)
+    -join ($emojiCodepoints[$Name] | ForEach-Object { [System.Char]::ConvertFromUtf32($_) })
+}
+
 function Set-SandboxConfig {
-    param($Sandbox, [bool]$SoundEnabled = $true, [string]$SelectedSound = 'classic', [string]$CustomSoundFile = '')
-    $cfg = @{ soundEnabled = $SoundEnabled; selectedSound = $SelectedSound; customSoundFile = $CustomSoundFile }
+    param($Sandbox, [bool]$SoundEnabled = $true, [string]$SelectedSound = 'classic', [string]$CustomSoundFile = '', [string]$SelectedEmoji = 'sparkle')
+    $cfg = @{ soundEnabled = $SoundEnabled; selectedSound = $SelectedSound; customSoundFile = $CustomSoundFile; selectedEmoji = $SelectedEmoji }
     ($cfg | ConvertTo-Json -Compress) | Set-Content -Path $Sandbox.ConfigPath -Encoding utf8
 }
 
@@ -206,6 +220,111 @@ Describe "Watcher core behavior (PowerShell)" {
         Write-FakeState -Sandbox $sandbox -WtSession $wt -Status 'needsAttention'
         (Wait-ForLogLine -Sandbox $sandbox -WtSession $wt -Pattern 'MARKED') | Should Be $true
     }
+
+    It "no animation before needsAttention: heartbeat title stays exactly the original title" {
+        Start-IsolatedPsWatcher -Sandbox $sandbox -WtSession $wt | Out-Null
+        $hb1 = Wait-ForHeartbeat -Sandbox $sandbox -WtSession $wt
+        $hb1 | Should Not Be $null
+        $baseline = $hb1.title
+        $baseline | Should Not BeNullOrEmpty
+
+        Start-Sleep -Milliseconds 1200
+        (Get-HeartbeatEntry -Sandbox $sandbox -WtSession $wt).title | Should Be $baseline
+    }
+
+    foreach ($emojiName in @('sparkle','star','bell','bolt','fire','target','check','reddot','eyes','chat','heart','music')) {
+        It "emoji selection '$emojiName' animates that exact glyph in the title, never a different one" {
+            Set-SandboxConfig -Sandbox $sandbox -SoundEnabled $true -SelectedEmoji $emojiName
+            Start-IsolatedPsWatcher -Sandbox $sandbox -WtSession $wt | Out-Null
+            $hb1 = Wait-ForHeartbeat -Sandbox $sandbox -WtSession $wt
+            $baseline = $hb1.title
+            $glyph = Get-EmojiChar $emojiName
+
+            Write-FakeState -Sandbox $sandbox -WtSession $wt -Status 'needsAttention'
+            (Wait-ForLogLine -Sandbox $sandbox -WtSession $wt -Pattern 'MARKED') | Should Be $true
+            # heartbeat.title lags the real (immediately-updated) console title
+            # by up to one 500ms tick -- it's refreshed at the START of the
+            # NEXT loop iteration after a transition, not within the
+            # transition itself. A full tick of margin avoids a race here.
+            Start-Sleep -Milliseconds 700
+
+            $hb = Get-HeartbeatEntry -Sandbox $sandbox -WtSession $wt
+            $hb.title.EndsWith(" $baseline") | Should Be $true
+            $emojiRun = $hb.title.Substring(0, $hb.title.Length - $baseline.Length - 1)
+            $emojiRun.Length | Should BeGreaterThan 0
+            ($emojiRun.Length % $glyph.Length) | Should Be 0
+            $repeatCount = $emojiRun.Length / $glyph.Length
+            $emojiRun | Should Be ($glyph * $repeatCount)
+        }
+    }
+
+    It "the pulse cycles the same emoji through 1, 2, 3, 2 repeats -- a real grow/shrink pattern, not a static mark" {
+        Set-SandboxConfig -Sandbox $sandbox -SoundEnabled $true -SelectedEmoji 'star'
+        Start-IsolatedPsWatcher -Sandbox $sandbox -WtSession $wt | Out-Null
+        $hb1 = Wait-ForHeartbeat -Sandbox $sandbox -WtSession $wt
+        $baseline = $hb1.title
+        $glyph = Get-EmojiChar 'star'
+
+        Write-FakeState -Sandbox $sandbox -WtSession $wt -Status 'needsAttention'
+        (Wait-ForLogLine -Sandbox $sandbox -WtSession $wt -Pattern 'MARKED') | Should Be $true
+
+        $counts = @()
+        for ($i = 0; $i -lt 7; $i++) {
+            Start-Sleep -Milliseconds 550
+            $hb = Get-HeartbeatEntry -Sandbox $sandbox -WtSession $wt
+            $hb.title.EndsWith(" $baseline") | Should Be $true
+            $emojiRun = $hb.title.Substring(0, $hb.title.Length - $baseline.Length - 1)
+            $emojiRun | Should Be ($glyph * ($emojiRun.Length / $glyph.Length))
+            $counts += ($emojiRun.Length / $glyph.Length)
+        }
+
+        # Every observed frame is a valid pulse amplitude (1, 2, or 3 copies)...
+        (@($counts | Where-Object { $_ -notin @(1, 2, 3) })).Count | Should Be 0
+        # ...it's actually animating, not stuck on one size...
+        (@($counts | Select-Object -Unique)).Count | Should BeGreaterThan 1
+        # ...and it moves smoothly (a triangle wave: each step is +/-1), which a
+        # second, independent animation loop racing this one would be very
+        # unlikely to preserve across 6 consecutive transitions.
+        for ($i = 1; $i -lt $counts.Count; $i++) {
+            ([Math]::Abs($counts[$i] - $counts[$i - 1])) | Should Be 1
+        }
+    }
+
+    It "CLEARED stops the animation and restores the original title exactly, and it stays that way" {
+        Start-IsolatedPsWatcher -Sandbox $sandbox -WtSession $wt | Out-Null
+        $hb1 = Wait-ForHeartbeat -Sandbox $sandbox -WtSession $wt
+        $baseline = $hb1.title
+
+        Write-FakeState -Sandbox $sandbox -WtSession $wt -Status 'needsAttention'
+        (Wait-ForLogLine -Sandbox $sandbox -WtSession $wt -Pattern 'MARKED') | Should Be $true
+        Start-Sleep -Milliseconds 1200
+        (Get-HeartbeatEntry -Sandbox $sandbox -WtSession $wt).title | Should Not Be $baseline
+
+        Write-FakeState -Sandbox $sandbox -WtSession $wt -Status 'clear'
+        (Wait-ForLogLine -Sandbox $sandbox -WtSession $wt -Pattern 'CLEARED') | Should Be $true
+        # Same one-tick heartbeat lag as noted above, in reverse.
+        Start-Sleep -Milliseconds 700
+        (Get-HeartbeatEntry -Sandbox $sandbox -WtSession $wt).title | Should Be $baseline
+
+        # No residual ticking after clear -- it does not drift or resume animating.
+        Start-Sleep -Milliseconds 1200
+        (Get-HeartbeatEntry -Sandbox $sandbox -WtSession $wt).title | Should Be $baseline
+    }
+
+    It "two parallel sessions animate independently -- marking one does not affect the other" {
+        $wt2 = New-FakeWtSession
+        Start-IsolatedPsWatcher -Sandbox $sandbox -WtSession $wt | Out-Null
+        Start-IsolatedPsWatcher -Sandbox $sandbox -WtSession $wt2 | Out-Null
+        $baseline1 = (Wait-ForHeartbeat -Sandbox $sandbox -WtSession $wt).title
+        $baseline2 = (Wait-ForHeartbeat -Sandbox $sandbox -WtSession $wt2).title
+
+        Write-FakeState -Sandbox $sandbox -WtSession $wt -Status 'needsAttention'
+        (Wait-ForLogLine -Sandbox $sandbox -WtSession $wt -Pattern 'MARKED') | Should Be $true
+        Start-Sleep -Milliseconds 600
+
+        (Get-HeartbeatEntry -Sandbox $sandbox -WtSession $wt).title | Should Not Be $baseline1
+        (Get-HeartbeatEntry -Sandbox $sandbox -WtSession $wt2).title | Should Be $baseline2
+    }
 }
 
 Describe "Watcher core behavior (CMD)" {
@@ -317,5 +436,45 @@ Describe "Watcher core behavior (CMD)" {
         $ok | Should Be $true
         Test-Path (Get-StatePath $sandbox $wt) | Should Be $false
         Test-Path (Get-HeartbeatPath $sandbox $wt) | Should Be $false
+    }
+
+    # Core emoji-pulse behavior for the CMD shell -- not the full 10-emoji
+    # sweep (already covered exhaustively for PowerShell above, and both
+    # shells share the exact same catalog/animation logic, only duplicated
+    # verbatim per this file's existing convention), just proof that the
+    # duplicated catalog and pulse loop work correctly in this shell too.
+    It "emoji selection 'bell' animates that exact glyph in the title, never a different one" {
+        Set-SandboxConfig -Sandbox $sandbox -SoundEnabled $true -SelectedEmoji 'bell'
+        $started = Start-TrackedCmdWatcher -Sandbox $sandbox -WtSession $wt
+        $baseline = $started.Heartbeat.title
+        $baseline | Should Not BeNullOrEmpty
+        $glyph = Get-EmojiChar 'bell'
+
+        Write-FakeState -Sandbox $sandbox -WtSession $wt -Status 'needsAttention'
+        (Wait-ForLogLine -Sandbox $sandbox -WtSession $wt -Pattern 'MARKED') | Should Be $true
+        # heartbeat.title lags the real (immediately-updated) console title by
+        # up to one 500ms tick -- see the PowerShell describe block above.
+        Start-Sleep -Milliseconds 700
+
+        $hb = Get-HeartbeatEntry -Sandbox $sandbox -WtSession $wt
+        $hb.title.EndsWith(" $baseline") | Should Be $true
+        $emojiRun = $hb.title.Substring(0, $hb.title.Length - $baseline.Length - 1)
+        $emojiRun.Length | Should BeGreaterThan 0
+        $emojiRun | Should Be ($glyph * ($emojiRun.Length / $glyph.Length))
+    }
+
+    It "CLEARED stops the animation and restores the original title exactly" {
+        $started = Start-TrackedCmdWatcher -Sandbox $sandbox -WtSession $wt
+        $baseline = $started.Heartbeat.title
+
+        Write-FakeState -Sandbox $sandbox -WtSession $wt -Status 'needsAttention'
+        (Wait-ForLogLine -Sandbox $sandbox -WtSession $wt -Pattern 'MARKED') | Should Be $true
+        Start-Sleep -Milliseconds 1200
+        (Get-HeartbeatEntry -Sandbox $sandbox -WtSession $wt).title | Should Not Be $baseline
+
+        Write-FakeState -Sandbox $sandbox -WtSession $wt -Status 'clear'
+        (Wait-ForLogLine -Sandbox $sandbox -WtSession $wt -Pattern 'CLEARED') | Should Be $true
+        Start-Sleep -Milliseconds 700
+        (Get-HeartbeatEntry -Sandbox $sandbox -WtSession $wt).title | Should Be $baseline
     }
 }

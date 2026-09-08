@@ -1,5 +1,6 @@
 {
   "soundEnabled": true,
   "selectedSound": "classic",
-  "customSoundFile": ""
+  "customSoundFile": "",
+  "selectedEmoji": "sparkle"
 }

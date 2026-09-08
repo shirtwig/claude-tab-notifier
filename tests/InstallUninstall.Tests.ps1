@@ -108,7 +108,19 @@ function Invoke-InstallScript {
     # treated as "not given" (empty string is falsy) and silently skip stdin
     # redirection entirely -- observed empirically as a 30s hang, since the
     # child then waits on the real ambient console instead.
-    param($Sandbox, [string]$InstallScriptPath = $installScript, [switch]$SkipSoundPrompt = $true, [string]$SelectedSound = $null, [string[]]$InputLines = $null)
+    #
+    # -SkipSoundPrompt/-SkipEmojiPrompt both default true and are independent:
+    # a caller wanting to drive one prompt interactively via -InputLines must
+    # explicitly pass that one's Skip switch as $false (see
+    # Invoke-InstallScriptInteractive / Invoke-InstallScriptEmojiInteractive
+    # below), leaving the other at its default so it doesn't also try to read
+    # from the same -InputLines queue.
+    param(
+        $Sandbox, [string]$InstallScriptPath = $installScript,
+        [switch]$SkipSoundPrompt = $true, [string]$SelectedSound = $null,
+        [switch]$SkipEmojiPrompt = $true, [string]$SelectedEmoji = $null,
+        [string[]]$InputLines = $null
+    )
     $argParts = @(
         '-NoProfile', '-File', $InstallScriptPath,
         '-DeployDir', $Sandbox.DeployDir,
@@ -119,8 +131,13 @@ function Invoke-InstallScript {
     )
     if ($SelectedSound) {
         $argParts += @('-SelectedSound', $SelectedSound)
-    } elseif ($SkipSoundPrompt -and ($null -eq $InputLines)) {
+    } elseif ($SkipSoundPrompt) {
         $argParts += '-SkipSoundPrompt'
+    }
+    if ($SelectedEmoji) {
+        $argParts += @('-SelectedEmoji', $SelectedEmoji)
+    } elseif ($SkipEmojiPrompt) {
+        $argParts += '-SkipEmojiPrompt'
     }
     $argString = ConvertTo-QuotedArgString $argParts
 
@@ -181,6 +198,16 @@ function Invoke-InstallScriptInteractive {
     # real -InputLines answers below it all land correctly.
     param($Sandbox, [string[]]$InputLines)
     Invoke-InstallScript -Sandbox $Sandbox -SkipSoundPrompt:$false -InputLines (@('') + $InputLines)
+}
+
+function Invoke-InstallScriptEmojiInteractive {
+    # Same dummy-first-line workaround as Invoke-InstallScriptInteractive --
+    # the corruption hits whichever Read-Host call happens to be the FIRST one
+    # in the child process's lifetime, regardless of which step it belongs to.
+    # Since the sound prompt is skipped here (-SkipSoundPrompt stays at its
+    # default true), the emoji prompt's own first read is that first call.
+    param($Sandbox, [string[]]$InputLines)
+    Invoke-InstallScript -Sandbox $Sandbox -SkipEmojiPrompt:$false -InputLines (@('') + $InputLines)
 }
 
 function Get-DeployedConfig {
@@ -543,5 +570,84 @@ Describe "Installer: sound selection" {
         $cfg = Get-DeployedConfig -Sandbox $sandbox
         $cfg.selectedSound | Should Be 'digital'
         $cfg.soundEnabled | Should Be $false
+    }
+}
+
+$allEmojiKeys = @('sparkle','star','bell','bolt','fire','target','check','reddot','eyes','chat','heart','music')
+
+Describe "Installer: emoji selection" {
+    BeforeEach { $sandbox = New-InstallSandbox }
+    AfterEach { Remove-InstallSandbox $sandbox }
+
+    foreach ($emojiName in $allEmojiKeys) {
+        It "-SelectedEmoji '$emojiName' sets selectedEmoji directly, no prompt" {
+            (Invoke-InstallScript -Sandbox $sandbox -SelectedEmoji $emojiName) | Should Be 0
+            (Get-DeployedConfig -Sandbox $sandbox).selectedEmoji | Should Be $emojiName
+        }
+    }
+
+    It "an unrecognized -SelectedEmoji is rejected and falls back to the current/default value" {
+        (Invoke-InstallScript -Sandbox $sandbox -SelectedEmoji 'not-a-real-emoji') | Should Be 0
+        (Get-DeployedConfig -Sandbox $sandbox).selectedEmoji | Should Be 'sparkle'
+    }
+
+    It "a fresh install with no emoji choice at all defaults to sparkle (-SkipEmojiPrompt)" {
+        (Invoke-InstallScript -Sandbox $sandbox) | Should Be 0
+        (Get-DeployedConfig -Sandbox $sandbox).selectedEmoji | Should Be 'sparkle'
+    }
+
+    It "interactive: a valid numeric choice selects that emoji (no preview/confirm step)" {
+        # "3" = bell
+        (Invoke-InstallScriptEmojiInteractive -Sandbox $sandbox -InputLines @('3')) | Should Be 0
+        (Get-DeployedConfig -Sandbox $sandbox).selectedEmoji | Should Be 'bell'
+    }
+
+    It "interactive: an invalid number is rejected and re-prompts instead of crashing" {
+        # "55" invalid -> re-prompted -> "3" = bell
+        (Invoke-InstallScriptEmojiInteractive -Sandbox $sandbox -InputLines @('55', '3')) | Should Be 0
+        (Get-DeployedConfig -Sandbox $sandbox).selectedEmoji | Should Be 'bell'
+    }
+
+    It "interactive: pressing Enter with no prior config keeps the sparkle default" {
+        (Invoke-InstallScriptEmojiInteractive -Sandbox $sandbox -InputLines @('')) | Should Be 0
+        (Get-DeployedConfig -Sandbox $sandbox).selectedEmoji | Should Be 'sparkle'
+    }
+
+    It "interactive: pressing Enter on a re-install preserves the existing selectedEmoji" {
+        (Invoke-InstallScript -Sandbox $sandbox -SelectedEmoji 'fire') | Should Be 0
+        (Invoke-InstallScriptEmojiInteractive -Sandbox $sandbox -InputLines @('')) | Should Be 0
+        (Get-DeployedConfig -Sandbox $sandbox).selectedEmoji | Should Be 'fire'
+    }
+
+    It "a plain -SkipEmojiPrompt re-install preserves the existing selectedEmoji too" {
+        (Invoke-InstallScript -Sandbox $sandbox -SelectedEmoji 'target') | Should Be 0
+        (Invoke-InstallScript -Sandbox $sandbox) | Should Be 0
+        (Get-DeployedConfig -Sandbox $sandbox).selectedEmoji | Should Be 'target'
+    }
+
+    It "does not change any sound settings when only selectedEmoji is chosen" {
+        Set-PreDeployedConfig -Sandbox $sandbox -SelectedSound 'magic' -SoundEnabled $false -CustomSoundFile 'C:\custom\ping.wav'
+        (Invoke-InstallScript -Sandbox $sandbox -SelectedEmoji 'eyes') | Should Be 0
+        $cfg = Get-DeployedConfig -Sandbox $sandbox
+        $cfg.selectedEmoji | Should Be 'eyes'
+        $cfg.selectedSound | Should Be 'magic'
+        $cfg.soundEnabled | Should Be $false
+        $cfg.customSoundFile | Should Be 'C:\custom\ping.wav'
+    }
+
+    It "does not change selectedEmoji when only a sound choice is made" {
+        Set-PreDeployedConfig -Sandbox $sandbox -SelectedSound 'classic'
+        (Invoke-InstallScript -Sandbox $sandbox -SelectedEmoji 'chat') | Should Be 0
+        (Invoke-InstallScript -Sandbox $sandbox -SelectedSound 'retro') | Should Be 0
+        $cfg = Get-DeployedConfig -Sandbox $sandbox
+        $cfg.selectedSound | Should Be 'retro'
+        $cfg.selectedEmoji | Should Be 'chat'
+    }
+
+    It "a missing/corrupt deployed config.json does not crash the installer" {
+        New-Item -ItemType Directory -Path $sandbox.DeployDir -Force | Out-Null
+        Set-Content -Path (Join-Path $sandbox.DeployDir 'config.json') -Value '{ this is not valid json' -Encoding utf8
+        (Invoke-InstallScript -Sandbox $sandbox) | Should Be 0
+        Test-Path $sandbox.ExeDeployPath | Should Be $true
     }
 }

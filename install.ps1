@@ -23,7 +23,14 @@ param(
     # skips the prompt and keeps whatever is already configured (or the fresh
     # default) untouched -- for unattended/automated installs.
     [string]$SelectedSound = $null,
-    [switch]$SkipSoundPrompt
+    [switch]$SkipSoundPrompt,
+    # Same controls, for the attention emoji. -SelectedEmoji sets it directly
+    # with no prompt at all; -SkipEmojiPrompt skips the prompt and keeps
+    # whatever is already configured (or the fresh default). Independent of
+    # the sound controls above -- either prompt can be skipped/scripted
+    # without affecting the other.
+    [string]$SelectedEmoji = $null,
+    [switch]$SkipEmojiPrompt
 )
 
 $ErrorActionPreference = 'Stop'
@@ -63,7 +70,7 @@ Write-Host ""
 
 # --- 1. build and deploy the hook exe ---
 if ($SourceExePath) {
-    Write-Host "[1/6] Deploying provided hook exe (build skipped: -SourceExePath given) ..." -ForegroundColor Yellow
+    Write-Host "[1/7] Deploying provided hook exe (build skipped: -SourceExePath given) ..." -ForegroundColor Yellow
     if (-not (Test-Path $SourceExePath)) {
         Write-Host "[FAIL] -SourceExePath not found: $SourceExePath" -ForegroundColor Red
         exit 1
@@ -74,7 +81,7 @@ if ($SourceExePath) {
     Write-Host "  deployed: $exeDeployPath"
     Write-Host ""
 } else {
-    Write-Host "[1/6] Building ClaudeAttention.exe ..." -ForegroundColor Yellow
+    Write-Host "[1/7] Building ClaudeAttention.exe ..." -ForegroundColor Yellow
     $dotnetCmd = Get-Command dotnet -ErrorAction SilentlyContinue
     if (-not $dotnetCmd) {
         Write-Host "[FAIL] dotnet CLI not found on PATH. Install the .NET SDK first." -ForegroundColor Red
@@ -102,7 +109,7 @@ if ($SourceExePath) {
 }
 
 # --- 2. deploy watcher, sound, config assets ---
-Write-Host "[2/6] Deploying watcher and sound assets ..." -ForegroundColor Yellow
+Write-Host "[2/7] Deploying watcher and sound assets ..." -ForegroundColor Yellow
 New-Item -ItemType Directory -Path $soundsDeployDir -Force | Out-Null
 
 Copy-Item -Path (Join-Path $PSScriptRoot 'watcher-background.ps1') -Destination (Join-Path $deployDir 'watcher-background.ps1') -Force
@@ -138,7 +145,7 @@ Write-Host "  unblocked deployed files (removes 'Mark of the Web' from a downloa
 Write-Host ""
 
 # --- 3. choose notification sound ---
-Write-Host "[3/6] Choosing notification sound ..." -ForegroundColor Yellow
+Write-Host "[3/7] Choosing notification sound ..." -ForegroundColor Yellow
 
 $soundCatalog = [ordered]@{
     classic = 'Classic -- two-tone chime'
@@ -251,8 +258,97 @@ if ($finalSound -ne $soundConfig.selectedSound) {
 }
 Write-Host ""
 
-# --- 4. merge into settings.json (hooks + env), with manifest tracking for the env key ---
-Write-Host "[4/6] Updating Claude Code settings.json ..." -ForegroundColor Yellow
+# --- 4. choose attention emoji ---
+Write-Host "[4/7] Choosing attention emoji ..." -ForegroundColor Yellow
+
+# Display glyphs are built the same way as watcher-background.ps1 resolves
+# them at runtime (ConvertFromUtf32 from a Codepoints array, almost always
+# one value) -- see that file for why this catalog is duplicated there rather
+# than shared, and why 'heart' needs two codepoints (U+FE0F forces the color
+# emoji presentation instead of a plain text glyph).
+$emojiCatalog = [ordered]@{
+    sparkle = @{ Codepoints = @(0x2728);          Name = 'Sparkle' }
+    star    = @{ Codepoints = @(0x2B50);          Name = 'Star' }
+    bell    = @{ Codepoints = @(0x1F514);         Name = 'Bell' }
+    bolt    = @{ Codepoints = @(0x26A1);          Name = 'Lightning bolt' }
+    fire    = @{ Codepoints = @(0x1F525);         Name = 'Fire' }
+    target  = @{ Codepoints = @(0x1F3AF);         Name = 'Target' }
+    check   = @{ Codepoints = @(0x2705);          Name = 'Check mark' }
+    reddot  = @{ Codepoints = @(0x1F534);         Name = 'Red dot' }
+    eyes    = @{ Codepoints = @(0x1F440);         Name = 'Eyes' }
+    chat    = @{ Codepoints = @(0x1F4AC);         Name = 'Chat bubble' }
+    heart   = @{ Codepoints = @(0x2764, 0xFE0F);  Name = 'Heart' }
+    music   = @{ Codepoints = @(0x1F3B5);         Name = 'Music note' }
+}
+$emojiKeys = @($emojiCatalog.Keys)
+
+# $soundConfig already reflects the latest on-disk state (including the
+# selectedSound write just above) -- reused here rather than re-reading the
+# file, so both steps write through the same in-memory object.
+if (-not $soundConfig.PSObject.Properties['selectedEmoji'] -or -not $soundConfig.selectedEmoji) {
+    $soundConfig | Add-Member -MemberType NoteProperty -Name 'selectedEmoji' -Value 'sparkle' -Force
+}
+$currentEmoji = $soundConfig.selectedEmoji
+if (-not ($emojiKeys -contains $currentEmoji)) { $currentEmoji = 'sparkle' }
+
+$finalEmoji = $currentEmoji
+
+if ($SelectedEmoji) {
+    if ($emojiKeys -contains $SelectedEmoji) {
+        $finalEmoji = $SelectedEmoji
+        Write-Host "  emoji set via -SelectedEmoji: $finalEmoji"
+    } else {
+        Write-Host "  -SelectedEmoji '$SelectedEmoji' is not a recognized emoji name -- keeping '$currentEmoji'" -ForegroundColor DarkYellow
+    }
+} elseif ($SkipEmojiPrompt) {
+    Write-Host "  emoji prompt skipped (-SkipEmojiPrompt) -- keeping '$currentEmoji'"
+} else {
+    # Same try/catch safety net as the sound prompt above (no Console.In.Peek()
+    # pre-check -- see its comment for why). No preview here: unlike sound,
+    # there is nothing to play, and a glyph is either legible in this console
+    # or it isn't -- an extra confirm step would just be friction.
+    try {
+        while ($true) {
+            Write-Host ""
+            Write-Host "  Choose an attention emoji:"
+            for ($i = 0; $i -lt $emojiKeys.Count; $i++) {
+                $key = $emojiKeys[$i]
+                $glyph = -join ($emojiCatalog[$key].Codepoints | ForEach-Object { [System.Char]::ConvertFromUtf32($_) })
+                $marker = if ($key -eq $currentEmoji) { '  (current)' } else { '' }
+                Write-Host ("    {0,2}. {1}  {2}{3}" -f ($i + 1), $glyph, $emojiCatalog[$key].Name, $marker)
+            }
+            $rawEmoji = Read-Host "  Enter a number (1-$($emojiKeys.Count)), or press Enter to keep '$currentEmoji'"
+            if ([string]::IsNullOrWhiteSpace($rawEmoji)) {
+                $finalEmoji = $currentEmoji
+                break
+            }
+
+            $emojiChoiceNum = 0
+            if (-not [int]::TryParse($rawEmoji.Trim(), [ref]$emojiChoiceNum) -or $emojiChoiceNum -lt 1 -or $emojiChoiceNum -gt $emojiKeys.Count) {
+                Write-Host "    Not a valid choice -- enter a number from 1 to $($emojiKeys.Count)." -ForegroundColor Yellow
+                continue
+            }
+
+            $finalEmoji = $emojiKeys[$emojiChoiceNum - 1]
+            break
+        }
+    } catch {
+        Write-Host "  no interactive input available -- keeping '$currentEmoji'" -ForegroundColor DarkYellow
+        $finalEmoji = $currentEmoji
+    }
+}
+
+if ($finalEmoji -ne $soundConfig.selectedEmoji) {
+    $soundConfig.selectedEmoji = $finalEmoji
+    $soundConfig | ConvertTo-Json -Depth 5 | Set-Content -Path $deployedConfigPath -Encoding utf8
+    Write-Host "  selectedEmoji set to '$finalEmoji'"
+} else {
+    Write-Host "  selectedEmoji unchanged ('$finalEmoji')"
+}
+Write-Host ""
+
+# --- 5. merge into settings.json (hooks + env), with manifest tracking for the env key ---
+Write-Host "[5/7] Updating Claude Code settings.json ..." -ForegroundColor Yellow
 
 $settings = $null
 if (Test-Path $settingsPath) {
@@ -348,8 +444,8 @@ if ($hooksChanged -or $envChanged) {
 $manifest | ConvertTo-Json -Depth 5 | Set-Content -Path $manifestPath -Encoding utf8
 Write-Host ""
 
-# --- 5. add watcher auto-start to $PROFILE ---
-Write-Host "[5/6] Updating PowerShell profile ..." -ForegroundColor Yellow
+# --- 6. add watcher auto-start to $PROFILE ---
+Write-Host "[6/7] Updating PowerShell profile ..." -ForegroundColor Yellow
 
 $profileBlockLines = @(
     $profileMarkerStart,
@@ -389,8 +485,8 @@ if (-not $profileHasMarker) {
 }
 Write-Host ""
 
-# --- 6. verify ---
-Write-Host "[6/6] Verifying installation ..." -ForegroundColor Yellow
+# --- 7. verify ---
+Write-Host "[7/7] Verifying installation ..." -ForegroundColor Yellow
 $allOk = $true
 
 function Test-Step {
