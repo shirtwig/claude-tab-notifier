@@ -38,24 +38,26 @@ Watcher (רץ בתוך הטאב שלך ב-Windows Terminal)
 
 ## התקנה — למשתמש שמוריד ZIP מ-GitHub
 
-1. גשו לעמוד ה-repository: [github.com/shirtwig/claude-tab-notifier](https://github.com/shirtwig/claude-tab-notifier)
-2. לחצו על **Code → Download ZIP**, ואז חלצו (Extract) את הקובץ לתיקייה כלשהי במחשב.
-3. פתחו **Windows Terminal** עם **PowerShell**, ועברו לתיקייה שחילצתם אליה, לדוגמה:
+1. הורידו את ה-Release ZIP מ-GitHub: [github.com/shirtwig/claude-tab-notifier](https://github.com/shirtwig/claude-tab-notifier), וחלצו (Extract) אותו לתיקייה כלשהי במחשב.
+2. פתחו **PowerShell** בתוך התיקייה שחילצתם אליה (לדוגמה: `cd "$HOME\Downloads\claude-tab-notifier-master"`).
+3. הריצו בדיוק את הפקודה הבאה:
    ```powershell
-   cd "$HOME\Downloads\claude-tab-notifier-master"
+   powershell.exe -ExecutionPolicy Bypass -File .\install.ps1
    ```
-4. הריצו את ה-installer:
-   ```powershell
-   .\install.ps1
-   ```
+   הרצה של `.\install.ps1` בלבד — או לחיצה כפולה על הקובץ, או "Run with PowerShell" מהתפריט שנפתח בלחיצה ימנית — **אינה** דרך ההתקנה הנתמכת: PowerShell לא טוען סקריפטים מהתיקייה הנוכחית בלי קידומת `.\` מפורשת, וגם עם ה-`.\`, מדיניות ה-Execution Policy הנפוצה עדיין עלולה לחסום את ההרצה ללא `-ExecutionPolicy Bypass`. הפקודה המלאה למעלה היא זו שבאמת נדרשת.
+4. עקבו אחר ההנחיות של ה-installer ובחרו Sound (צליל) ו-Emoji (לחיצה על Enter בכל אחת מהשאלות שומרת על הבחירה הנוכחית/ברירת המחדל).
+5. בסיום, פתחו טאב חדש של **Windows Terminal** והפעילו את `claude` כרגיל — ה-watcher יתחיל לרוץ אוטומטית דרך ה-`$PROFILE`.
 
-ה-installer מבצע חמישה שלבים:
+ה-installer מבצע שבעה שלבים:
 1. בונה את `ClaudeAttention.exe` (ה-hook) ופורס אותו לתוך `~/.claude/tools/ClaudeAttention.exe`.
 2. פורס את קובץ ה-watcher, קובצי הצליל, ואת `config.json` לתוך `%LOCALAPPDATA%\ClaudeTabNotifierPOC\`.
-3. מוסיף hooks בשם `Notification`, `Stop`, ו-`UserPromptSubmit` לקובץ `~/.claude/settings.json`, וקובע `env.CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` (למה זה נדרש — [ראו למטה](#הגדרת-claude_code_disable_terminal_title)). כל תוכן אחר שכבר קיים ב-`settings.json` — hooks אחרים, משתני env אחרים, כל דבר אחר — נשאר בדיוק כפי שהיה.
-4. מוסיף בלוק קצר של הפעלה אוטומטית ל-`$PROFILE` שלכם ב-PowerShell, כך שה-watcher יתחיל לרוץ אוטומטית בכל טאב PowerShell חדש. כל תוכן אחר שכבר קיים ב-profile נשאר כפי שהיה.
+3. שואל אתכם לבחור צליל התראה, ושומר את הבחירה ל-`config.json` (הרצה חוזרת של ה-installer מציגה את הבחירה הנוכחית ושומרת עליה בלחיצת Enter).
+4. שואל אתכם לבחור אימוג'י התראה, באותו אופן.
+5. מוסיף hooks בשם `Notification`, `Stop`, ו-`UserPromptSubmit` לקובץ `~/.claude/settings.json`, וקובע `env.CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` (למה זה נדרש — [ראו למטה](#הגדרת-claude_code_disable_terminal_title)). כל תוכן אחר שכבר קיים ב-`settings.json` — hooks אחרים, משתני env אחרים, כל דבר אחר — נשאר בדיוק כפי שהיה.
+6. מוסיף בלוק קצר של הפעלה אוטומטית ל-`$PROFILE` שלכם ב-PowerShell, כך שה-watcher יתחיל לרוץ אוטומטית בכל טאב PowerShell חדש. כל תוכן אחר שכבר קיים ב-profile נשאר כפי שהיה.
+7. מוודא (verify) שכל מה שלמעלה אכן נפרס/הוגדר כראוי, ומדווח על כך.
 
-בטוח להריץ את ה-installer יותר מפעם אחת: כל שלב בודק קודם אם הוא כבר בוצע, כך שהרצה חוזרת לא יוצרת hooks כפולים או בלוקים כפולים ב-profile. ה-installer גם שומר גיבוי אוטומטי (`<file>.backup-<timestamp>`) של `settings.json` ושל `$PROFILE`, ממש לפני שהוא בפועל משנה אותם.
+בטוח להריץ את ה-installer יותר מפעם אחת: כל שלב בודק קודם אם הוא כבר בוצע, כך שהרצה חוזרת לא יוצרת hooks כפולים או בלוקים כפולים ב-profile, ולא מאפסת בחירת צליל/אימוג'י קיימת. ה-installer גם שומר גיבוי אוטומטי (`<file>.backup-<timestamp>`) של `settings.json` ושל `$PROFILE`, ממש לפני שהוא בפועל משנה אותם.
 
 לאחר ההתקנה — **סגרו ופתחו מחדש את טאבי ה-PowerShell שלכם** (או טענו מחדש את ה-`$PROFILE`) כדי שה-watcher יתחיל לרוץ.
 
@@ -108,9 +110,12 @@ You can now run 'claude' normally in this same tab to start a second session.
 {
   "soundEnabled": true,
   "selectedSound": "classic",
-  "customSoundFile": ""
+  "customSoundFile": "",
+  "selectedEmoji": "sparkle"
 }
 ```
+
+כדי לשנות שדה כלשהו ידנית, ערכו רק את השדה שאתם רוצים לשנות והשאירו את שאר הקובץ בדיוק כפי שהוא — כל שדה עצמאי לחלוטין: עריכת `selectedEmoji` לעולם לא נוגעת ב-`selectedSound`/`soundEnabled`/`customSoundFile`, ולהפך (זו גם בדיוק ההתנהגות של שאלות הצליל והאימוג'י ב-installer עצמו — כל אחת כותבת רק לשדה שלה). ערך לא-מוכר באחד מ-`selectedSound`/`selectedEmoji` מטופל בדיוק כמו ערך חסר — נופל בשקט לברירת המחדל (`classic` / `sparkle`) ולא גורם לשגיאה.
 
 ### איך עובד הצליל, והחלפת צליל
 
@@ -149,6 +154,29 @@ You can now run 'claude' normally in this same tab to start a second session.
 
 תצורה (`config.json`) חסרה או פגומה תיפול חזרה לברירות המחדל שמופיעות למעלה, ולא תגרום לקריסה של ה-watcher.
 
+### האימוג'י, ואיך עובד ה-pulse
+
+- `selectedEmoji` קובע איזה אימוג'י מסמן כרטיסייה שזקוקה לתשומת לב. שנו את הערך לאחד מ-12 השמות בטבלה למטה כדי להחליף אימוג'י.
+
+| שם | אימוג'י |
+|---|---|
+| `sparkle` | ✨ (ברירת המחדל) |
+| `star` | ⭐ |
+| `bell` | 🔔 |
+| `bolt` | ⚡ |
+| `fire` | 🔥 |
+| `target` | 🎯 |
+| `check` | ✅ |
+| `reddot` | 🔴 |
+| `eyes` | 👀 |
+| `chat` | 💬 |
+| `heart` | ❤️ |
+| `music` | 🎵 |
+
+האימוג'י שבחרתם מופיע כתחילית בכותרת הכרטיסייה כל עוד ה-session זקוק לתשומת לב, ומבצע שם **pulse**: זהו אותו אימוג'י בדיוק לאורך כל הזמן (הוא לעולם לא מוחלף באימוג'י אחר) — רק שהוא חוזר על עצמו מספר פעמים משתנה: עותק אחד, ואז שניים, ואז שלושה, וחזרה לשניים, וחוזר חלילה. זו הדרך הקרובה ביותר ל"גדילה/הקטנה" שניתן להשיג בתוך מחרוזת טקסט פשוטה של כותרת — ל-Windows Terminal אין שום מנגנון לשליטה בגודל גופן של תו בודד בתוך הכותרת. שליחת prompt חדש עוצרת את ה-pulse ומחזירה את הכותרת המקורית בדיוק כפי שהייתה.
+
+הקובץ נקרא מחדש בכל פעם שה-watcher מתחיל לרוץ (בדיוק כמו הגדרות הצליל) — הוא **לא** נטען מחדש (hot-reload) ל-watchers שכבר רצים. יש לפתוח טאב חדש כדי שהחלפת אימוג'י תיכנס לתוקף.
+
 ## תמיכה ב-CMD
 
 `watcher-cmd.ps1` מממש בדיוק את אותה התנהגות (סימון, מניעת כפילויות, צליל, rotation ללוגים, ניקוי תהליכים יתומים) כמו ה-watcher של PowerShell, אבל מותאם ל-CMD.exe — הוא רץ כתהליך נפרד לחלוטין (מופעל דרך `start /B`), ולא כ-thread ברקע בתוך אותו תהליך, מכיוון של-CMD אין מקבילה למנגנון ה-runspace הפנימי של PowerShell. ההתנהגות הזו נבדקת באופן מלא ב-automated test suite של הפרויקט, לצד ה-watcher של PowerShell.
@@ -172,7 +200,7 @@ Claude Code מנהל בעצמו את כותרת הקונסולה — ספינר 
 ## הסרת ההתקנה (uninstall.ps1)
 
 ```powershell
-.\uninstall.ps1
+powershell.exe -ExecutionPolicy Bypass -File .\uninstall.ps1
 ```
 
 מסיר בדיוק את מה שה-installer הוסיף:

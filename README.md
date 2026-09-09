@@ -34,24 +34,31 @@ Watcher (running inside your Windows Terminal tab)
 
 Requires the .NET SDK (for `dotnet publish`) and PowerShell.
 
-```powershell
-.\install.ps1
-```
+1. Download the Release ZIP from GitHub and extract it.
+2. Open PowerShell inside the extracted folder.
+3. Run:
+   ```powershell
+   powershell.exe -ExecutionPolicy Bypass -File .\install.ps1
+   ```
+   Running `.\install.ps1` on its own — or double-clicking the file, or "Run with PowerShell" from the right-click menu — is **not** the supported install path: PowerShell does not run scripts from the current directory without either an explicit `.\` prefix or an execution-policy override, and depending on your system's default execution policy either of those alone may still be refused. The command above is the one actually needed.
+4. Follow the installer's prompts to choose a notification sound and an attention emoji (press Enter at either prompt to keep the current/default choice).
+5. Open a new Windows Terminal tab and start `claude` as usual — the watcher starts automatically via `$PROFILE`.
 
 This will:
 1. Build `ClaudeAttention.exe` (the hook) and deploy it to `~/.claude/tools/ClaudeAttention.exe`.
 2. Deploy the watcher, sound files, and `config.json` to `%LOCALAPPDATA%\ClaudeTabNotifierPOC\`.
-3. Add `Notification`, `Stop`, and `UserPromptSubmit` hooks to `~/.claude/settings.json`, and set `env.CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` (see [why this is needed](#why-claude_code_disable_terminal_title-is-required) below). Any other content already in `settings.json` — other hooks, other env vars, anything else — is left untouched.
-4. Add a small auto-start block to your PowerShell `$PROFILE`, so the watcher starts automatically in every new PowerShell tab. Anything else already in your profile is preserved.
+3. Ask you to choose a notification sound and an attention emoji, saving the choice to `config.json` (re-running the installer later shows your current choice and keeps it on Enter — see [Configuration](#configuration) below).
+4. Add `Notification`, `Stop`, and `UserPromptSubmit` hooks to `~/.claude/settings.json`, and set `env.CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` (see [why this is needed](#why-claude_code_disable_terminal_title-is-required) below). Any other content already in `settings.json` — other hooks, other env vars, anything else — is left untouched.
+5. Add a small auto-start block to your PowerShell `$PROFILE`, so the watcher starts automatically in every new PowerShell tab. Anything else already in your profile is preserved.
 
 It's safe to run more than once: every step checks whether it already applied before changing anything, so re-running doesn't duplicate hooks or profile blocks. It also backs up `settings.json` and `$PROFILE` (as `<file>.backup-<timestamp>`) immediately before actually modifying either one.
 
-After installing, close and reopen your PowerShell tabs (or reload `$PROFILE`) for the watcher to start.
+If you've already installed and just closed/reopened PowerShell tabs, that alone is enough for the watcher to start — no need to re-run the installer.
 
 ## Uninstalling
 
 ```powershell
-.\uninstall.ps1
+powershell.exe -ExecutionPolicy Bypass -File .\uninstall.ps1
 ```
 
 Removes exactly what the installer added:
@@ -71,13 +78,17 @@ Edit `%LOCALAPPDATA%\ClaudeTabNotifierPOC\config.json`:
 {
   "soundEnabled": true,
   "selectedSound": "classic",
-  "customSoundFile": ""
+  "customSoundFile": "",
+  "selectedEmoji": "sparkle"
 }
 ```
 
 - `soundEnabled` — set to `false` to disable sound entirely (the title still marks/clears normally).
 - `selectedSound` — one of the built-in names below, or `"custom"` to use `customSoundFile`.
 - `customSoundFile` — a path to your own `.wav` file, used when `selectedSound` is `"custom"`. Relative paths are resolved against the deploy directory; absolute paths are used as-is.
+- `selectedEmoji` — which emoji marks a tab that needs attention; one of the 12 names below.
+
+To change any of these by hand, edit only the field(s) you want to change and leave the rest of the file exactly as it is — each field is independent, so editing `selectedEmoji` never touches `selectedSound`/`soundEnabled`/`customSoundFile` or vice versa (this is also how the installer's own sound/emoji prompts behave: each one only ever writes its own field). An unrecognized value in either `selectedSound` or `selectedEmoji` is treated the same as if it were missing — it silently falls back to the default (`classic` / `sparkle`) rather than erroring.
 
 Config is re-read each time a watcher starts (i.e., each time you open a new tab) — it's not hot-reloaded into already-running watchers. A missing or malformed `config.json` falls back to the defaults shown above rather than failing.
 
@@ -99,6 +110,25 @@ Run `%LOCALAPPDATA%\ClaudeTabNotifierPOC\test-sound.ps1` to preview your current
 | `success` | Ascending 3-note major arpeggio |
 
 All ten are procedurally synthesized for this project (see `sounds/SOUNDS.md`) — no third-party samples.
+
+### Built-in emoji, and the pulse
+
+| Name | Emoji |
+|---|---|
+| `sparkle` | ✨ (the default) |
+| `star` | ⭐ |
+| `bell` | 🔔 |
+| `bolt` | ⚡ |
+| `fire` | 🔥 |
+| `target` | 🎯 |
+| `check` | ✅ |
+| `reddot` | 🔴 |
+| `eyes` | 👀 |
+| `chat` | 💬 |
+| `heart` | ❤️ |
+| `music` | 🎵 |
+
+The chosen emoji appears as a prefix in the tab title while the session needs attention, and *pulses* there: it's the same emoji throughout (never swapped for a different one) repeated a cycling number of times — 1 copy, then 2, then 3, then back down to 2, and so on — which is the closest approximation of a "grow/shrink" animation achievable inside a plain console title string (Windows Terminal titles are text, with no per-character font-size control). Submitting a prompt stops the pulse and restores the original title exactly.
 
 ## The notification lifecycle
 
