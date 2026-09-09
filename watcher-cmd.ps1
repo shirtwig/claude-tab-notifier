@@ -131,6 +131,7 @@ $soundEnabled = $true
 $selectedSound = 'classic'
 $customSoundFile = ''
 $selectedEmoji = 'sparkle'
+$emojiEnabled = $true
 $configPath = Join-Path $PSScriptRoot 'config.json'
 if (Test-Path $configPath) {
     try {
@@ -139,6 +140,7 @@ if (Test-Path $configPath) {
         if ($config.selectedSound) { $selectedSound = $config.selectedSound }
         if ($config.customSoundFile) { $customSoundFile = $config.customSoundFile }
         if ($config.selectedEmoji) { $selectedEmoji = $config.selectedEmoji }
+        if ($null -ne $config.emojiEnabled) { $emojiEnabled = [bool]$config.emojiEnabled }
     } catch {
         Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] failed to read config.json, using defaults ($($_.Exception.Message))"
     }
@@ -174,7 +176,7 @@ if ($selectedSound -eq 'custom') {
     $soundFile = Join-Path $PSScriptRoot "sounds\$selectedSound.wav"
 }
 
-Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] CMD watcher started. WT_SESSION=$env:WT_SESSION originalTitle=$originalTitle soundEnabled=$soundEnabled soundFile=$soundFile"
+Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] CMD watcher started. WT_SESSION=$env:WT_SESSION originalTitle=$originalTitle soundEnabled=$soundEnabled soundFile=$soundFile emojiEnabled=$emojiEnabled"
 
 $marked = $false
 $lastStatus = $null
@@ -196,7 +198,7 @@ while ($true) {
         # malformed state file can never suppress it; no per-tick log line to
         # avoid unbounded log growth; current title recorded in the
         # already-every-tick-overwritten heartbeat instead).
-        if ($marked) {
+        if ($marked -and $emojiEnabled) {
             $currentTitle = ($emojiChar * $animPattern[$animFrame]) + " $originalTitle"
             [ClaudeTabNotifier.Native]::SetConsoleTitleW($currentTitle) | Out-Null
             $animFrame = ($animFrame + 1) % $animPattern.Count
@@ -232,15 +234,23 @@ while ($true) {
 
         if ($status -eq 'needsAttention' -and -not $marked) {
             $marked = $true
+            # $marked is set unconditionally -- sound dedup and the title
+            # lifecycle must both stay correct regardless of whether the
+            # OTHER one is disabled. Only the title-writing below is
+            # conditional on $emojiEnabled.
             $animFrame = 0
-            # Set frame 0 immediately (matching the previous immediate-set
-            # behavior) rather than waiting for the next tick's animate step
-            # above -- then prime $animFrame so the next tick continues the
-            # cycle smoothly instead of repeating frame 0.
-            $firstFrameTitle = ($emojiChar * $animPattern[0]) + " $originalTitle"
-            [ClaudeTabNotifier.Native]::SetConsoleTitleW($firstFrameTitle) | Out-Null
-            $animFrame = 1 % $animPattern.Count
-            Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] MARKED -> $firstFrameTitle"
+            if ($emojiEnabled) {
+                # Set frame 0 immediately (matching the previous immediate-set
+                # behavior) rather than waiting for the next tick's animate step
+                # above -- then prime $animFrame so the next tick continues the
+                # cycle smoothly instead of repeating frame 0.
+                $firstFrameTitle = ($emojiChar * $animPattern[0]) + " $originalTitle"
+                [ClaudeTabNotifier.Native]::SetConsoleTitleW($firstFrameTitle) | Out-Null
+                $animFrame = 1 % $animPattern.Count
+                Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] MARKED -> $firstFrameTitle"
+            } else {
+                Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] MARKED (emoji disabled -- title unchanged)"
+            }
 
             if ($soundEnabled) {
                 try {
@@ -265,9 +275,13 @@ while ($true) {
             }
         }
         elseif ($status -eq 'clear' -and $marked) {
-            [ClaudeTabNotifier.Native]::SetConsoleTitleW($originalTitle) | Out-Null
+            if ($emojiEnabled) {
+                [ClaudeTabNotifier.Native]::SetConsoleTitleW($originalTitle) | Out-Null
+                Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] CLEARED -> $originalTitle"
+            } else {
+                Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] CLEARED (emoji disabled -- title unchanged)"
+            }
             $marked = $false
-            Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] CLEARED -> $originalTitle"
         }
     } catch {
         Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] LOOP ERROR: $($_.Exception.Message)"

@@ -470,9 +470,9 @@ function Set-PreDeployedConfig {
     # the installer's own "config.json already exists -- left untouched" logic
     # (step 2) leaves it in place for the sound-selection step (step 3) to read
     # -- exactly what a real re-install against a customized config looks like.
-    param($Sandbox, [string]$SelectedSound = 'classic', [bool]$SoundEnabled = $true, [string]$CustomSoundFile = '')
+    param($Sandbox, [string]$SelectedSound = 'classic', [bool]$SoundEnabled = $true, [string]$CustomSoundFile = '', [string]$SelectedEmoji = 'sparkle', [bool]$EmojiEnabled = $true)
     New-Item -ItemType Directory -Path $Sandbox.DeployDir -Force | Out-Null
-    $cfg = @{ soundEnabled = $SoundEnabled; selectedSound = $SelectedSound; customSoundFile = $CustomSoundFile }
+    $cfg = @{ soundEnabled = $SoundEnabled; selectedSound = $SelectedSound; customSoundFile = $CustomSoundFile; selectedEmoji = $SelectedEmoji; emojiEnabled = $EmojiEnabled }
     ($cfg | ConvertTo-Json -Compress) | Set-Content -Path (Join-Path $Sandbox.DeployDir 'config.json') -Encoding utf8
 }
 
@@ -532,12 +532,12 @@ Describe "Installer: sound selection" {
         (Get-DeployedConfig -Sandbox $sandbox).selectedSound | Should Be 'success'
     }
 
-    It "does not change soundEnabled when only selectedSound is chosen" {
+    It "choosing a real sound via -SelectedSound re-enables soundEnabled (deliberate: picking a sound implies wanting to hear it)" {
         Set-PreDeployedConfig -Sandbox $sandbox -SelectedSound 'classic' -SoundEnabled $false
         (Invoke-InstallScript -Sandbox $sandbox -SelectedSound 'chime') | Should Be 0
         $cfg = Get-DeployedConfig -Sandbox $sandbox
         $cfg.selectedSound | Should Be 'chime'
-        $cfg.soundEnabled | Should Be $false
+        $cfg.soundEnabled | Should Be $true
     }
 
     It "does not touch customSoundFile when switching away from 'custom'" {
@@ -563,13 +563,62 @@ Describe "Installer: sound selection" {
         Test-Path $sandbox.ExeDeployPath | Should Be $true
     }
 
-    It "soundEnabled=false: interactive selection still works, declining the extra preview prompt" {
+    It "interactive: choosing a real sound re-enables soundEnabled, after declining the extra preview prompt" {
         Set-PreDeployedConfig -Sandbox $sandbox -SelectedSound 'classic' -SoundEnabled $false
         # "7" = digital, "n" = decline the extra "preview anyway?" question, "" = confirm yes
         (Invoke-InstallScriptInteractive -Sandbox $sandbox -InputLines @('7', 'n', '')) | Should Be 0
         $cfg = Get-DeployedConfig -Sandbox $sandbox
         $cfg.selectedSound | Should Be 'digital'
+        $cfg.soundEnabled | Should Be $true
+    }
+
+    It "-SelectedSound '0' disables sound without forgetting the previously selected sound" {
+        Set-PreDeployedConfig -Sandbox $sandbox -SelectedSound 'magic' -SoundEnabled $true
+        (Invoke-InstallScript -Sandbox $sandbox -SelectedSound '0') | Should Be 0
+        $cfg = Get-DeployedConfig -Sandbox $sandbox
         $cfg.soundEnabled | Should Be $false
+        $cfg.selectedSound | Should Be 'magic'
+    }
+
+    It "interactive: choosing '0. No sound' disables sound and preserves the previous selection" {
+        Set-PreDeployedConfig -Sandbox $sandbox -SelectedSound 'magic' -SoundEnabled $true
+        # "0" = No sound, "" (blank) = confirm yes
+        (Invoke-InstallScriptInteractive -Sandbox $sandbox -InputLines @('0', '')) | Should Be 0
+        $cfg = Get-DeployedConfig -Sandbox $sandbox
+        $cfg.soundEnabled | Should Be $false
+        $cfg.selectedSound | Should Be 'magic'
+    }
+
+    It "interactive: declining the '0. No sound' confirmation re-prompts instead of disabling" {
+        Set-PreDeployedConfig -Sandbox $sandbox -SelectedSound 'magic' -SoundEnabled $true
+        # "0" = No sound, "n" = reject it, "3" = soft, "" = confirm yes
+        (Invoke-InstallScriptInteractive -Sandbox $sandbox -InputLines @('0', 'n', '3', '')) | Should Be 0
+        $cfg = Get-DeployedConfig -Sandbox $sandbox
+        $cfg.soundEnabled | Should Be $true
+        $cfg.selectedSound | Should Be 'soft'
+    }
+
+    It "interactive: pressing Enter with sound already disabled keeps it disabled" {
+        Set-PreDeployedConfig -Sandbox $sandbox -SelectedSound 'magic' -SoundEnabled $false
+        (Invoke-InstallScriptInteractive -Sandbox $sandbox -InputLines @('')) | Should Be 0
+        $cfg = Get-DeployedConfig -Sandbox $sandbox
+        $cfg.soundEnabled | Should Be $false
+        $cfg.selectedSound | Should Be 'magic'
+    }
+
+    It "a disabled sound survives a re-install that skips the prompt entirely" {
+        (Invoke-InstallScript -Sandbox $sandbox -SelectedSound '0') | Should Be 0
+        (Invoke-InstallScript -Sandbox $sandbox) | Should Be 0
+        (Get-DeployedConfig -Sandbox $sandbox).soundEnabled | Should Be $false
+    }
+
+    It "disabling sound does not touch any emoji setting" {
+        Set-PreDeployedConfig -Sandbox $sandbox -SelectedSound 'classic' -SelectedEmoji 'heart' -EmojiEnabled $true
+        (Invoke-InstallScript -Sandbox $sandbox -SelectedSound '0') | Should Be 0
+        $cfg = Get-DeployedConfig -Sandbox $sandbox
+        $cfg.soundEnabled | Should Be $false
+        $cfg.selectedEmoji | Should Be 'heart'
+        $cfg.emojiEnabled | Should Be $true
     }
 }
 
@@ -655,5 +704,123 @@ Describe "Installer: emoji selection" {
         Set-Content -Path (Join-Path $sandbox.DeployDir 'config.json') -Value '{ this is not valid json' -Encoding utf8
         (Invoke-InstallScript -Sandbox $sandbox) | Should Be 0
         Test-Path $sandbox.ExeDeployPath | Should Be $true
+    }
+
+    It "choosing a real emoji via -SelectedEmoji re-enables emojiEnabled (deliberate: picking an emoji implies wanting to see it)" {
+        Set-PreDeployedConfig -Sandbox $sandbox -SelectedEmoji 'sparkle' -EmojiEnabled $false
+        (Invoke-InstallScript -Sandbox $sandbox -SelectedEmoji 'fire') | Should Be 0
+        $cfg = Get-DeployedConfig -Sandbox $sandbox
+        $cfg.selectedEmoji | Should Be 'fire'
+        $cfg.emojiEnabled | Should Be $true
+    }
+
+    It "-SelectedEmoji '0' disables the pulse without forgetting the previously selected emoji" {
+        Set-PreDeployedConfig -Sandbox $sandbox -SelectedEmoji 'heart' -EmojiEnabled $true
+        (Invoke-InstallScript -Sandbox $sandbox -SelectedEmoji '0') | Should Be 0
+        $cfg = Get-DeployedConfig -Sandbox $sandbox
+        $cfg.emojiEnabled | Should Be $false
+        $cfg.selectedEmoji | Should Be 'heart'
+    }
+
+    It "interactive: choosing '0. No emoji' disables the pulse and preserves the previous selection" {
+        Set-PreDeployedConfig -Sandbox $sandbox -SelectedEmoji 'heart' -EmojiEnabled $true
+        # "0" = No emoji, "" (blank) = confirm yes
+        (Invoke-InstallScriptEmojiInteractive -Sandbox $sandbox -InputLines @('0', '')) | Should Be 0
+        $cfg = Get-DeployedConfig -Sandbox $sandbox
+        $cfg.emojiEnabled | Should Be $false
+        $cfg.selectedEmoji | Should Be 'heart'
+    }
+
+    It "interactive: declining the '0. No emoji' confirmation re-prompts instead of disabling" {
+        Set-PreDeployedConfig -Sandbox $sandbox -SelectedEmoji 'heart' -EmojiEnabled $true
+        # "0" = No emoji, "n" = reject it, "3" = bell, "" = confirm yes
+        (Invoke-InstallScriptEmojiInteractive -Sandbox $sandbox -InputLines @('0', 'n', '3', '')) | Should Be 0
+        $cfg = Get-DeployedConfig -Sandbox $sandbox
+        $cfg.emojiEnabled | Should Be $true
+        $cfg.selectedEmoji | Should Be 'bell'
+    }
+
+    It "interactive: pressing Enter with emoji already disabled keeps it disabled" {
+        Set-PreDeployedConfig -Sandbox $sandbox -SelectedEmoji 'heart' -EmojiEnabled $false
+        (Invoke-InstallScriptEmojiInteractive -Sandbox $sandbox -InputLines @('')) | Should Be 0
+        $cfg = Get-DeployedConfig -Sandbox $sandbox
+        $cfg.emojiEnabled | Should Be $false
+        $cfg.selectedEmoji | Should Be 'heart'
+    }
+
+    It "a disabled emoji survives a re-install that skips the prompt entirely" {
+        (Invoke-InstallScript -Sandbox $sandbox -SelectedEmoji '0') | Should Be 0
+        (Invoke-InstallScript -Sandbox $sandbox) | Should Be 0
+        (Get-DeployedConfig -Sandbox $sandbox).emojiEnabled | Should Be $false
+    }
+
+    It "disabling emoji does not touch any sound setting" {
+        Set-PreDeployedConfig -Sandbox $sandbox -SelectedSound 'magic' -SoundEnabled $true -SelectedEmoji 'sparkle'
+        (Invoke-InstallScript -Sandbox $sandbox -SelectedEmoji '0') | Should Be 0
+        $cfg = Get-DeployedConfig -Sandbox $sandbox
+        $cfg.emojiEnabled | Should Be $false
+        $cfg.selectedSound | Should Be 'magic'
+        $cfg.soundEnabled | Should Be $true
+    }
+}
+
+Describe "Installer: independent sound/emoji enable-disable (all 4 combinations)" {
+    BeforeEach { $sandbox = New-InstallSandbox }
+    AfterEach { Remove-InstallSandbox $sandbox }
+
+    It "mode 1: sound + emoji both enabled" {
+        (Invoke-InstallScript -Sandbox $sandbox -SelectedSound 'magic' -SelectedEmoji 'fire') | Should Be 0
+        $cfg = Get-DeployedConfig -Sandbox $sandbox
+        $cfg.soundEnabled | Should Be $true
+        $cfg.emojiEnabled | Should Be $true
+        $cfg.selectedSound | Should Be 'magic'
+        $cfg.selectedEmoji | Should Be 'fire'
+    }
+
+    It "mode 2: sound only (emoji disabled)" {
+        (Invoke-InstallScript -Sandbox $sandbox -SelectedSound 'magic' -SelectedEmoji '0') | Should Be 0
+        $cfg = Get-DeployedConfig -Sandbox $sandbox
+        $cfg.soundEnabled | Should Be $true
+        $cfg.emojiEnabled | Should Be $false
+        $cfg.selectedSound | Should Be 'magic'
+    }
+
+    It "mode 3: emoji only (sound disabled)" {
+        (Invoke-InstallScript -Sandbox $sandbox -SelectedSound '0' -SelectedEmoji 'fire') | Should Be 0
+        $cfg = Get-DeployedConfig -Sandbox $sandbox
+        $cfg.soundEnabled | Should Be $false
+        $cfg.emojiEnabled | Should Be $true
+        $cfg.selectedEmoji | Should Be 'fire'
+    }
+
+    It "mode 4: both sound and emoji disabled" {
+        (Invoke-InstallScript -Sandbox $sandbox -SelectedSound '0' -SelectedEmoji '0') | Should Be 0
+        $cfg = Get-DeployedConfig -Sandbox $sandbox
+        $cfg.soundEnabled | Should Be $false
+        $cfg.emojiEnabled | Should Be $false
+    }
+
+    It "mode 4 persists correctly across a re-install that skips both prompts" {
+        (Invoke-InstallScript -Sandbox $sandbox -SelectedSound '0' -SelectedEmoji '0') | Should Be 0
+        (Invoke-InstallScript -Sandbox $sandbox) | Should Be 0
+        $cfg = Get-DeployedConfig -Sandbox $sandbox
+        $cfg.soundEnabled | Should Be $false
+        $cfg.emojiEnabled | Should Be $false
+    }
+
+    It "re-enabling sound after mode 4 does not re-enable emoji" {
+        (Invoke-InstallScript -Sandbox $sandbox -SelectedSound '0' -SelectedEmoji '0') | Should Be 0
+        (Invoke-InstallScript -Sandbox $sandbox -SelectedSound 'classic') | Should Be 0
+        $cfg = Get-DeployedConfig -Sandbox $sandbox
+        $cfg.soundEnabled | Should Be $true
+        $cfg.emojiEnabled | Should Be $false
+    }
+
+    It "re-enabling emoji after mode 4 does not re-enable sound" {
+        (Invoke-InstallScript -Sandbox $sandbox -SelectedSound '0' -SelectedEmoji '0') | Should Be 0
+        (Invoke-InstallScript -Sandbox $sandbox -SelectedEmoji 'sparkle') | Should Be 0
+        $cfg = Get-DeployedConfig -Sandbox $sandbox
+        $cfg.soundEnabled | Should Be $false
+        $cfg.emojiEnabled | Should Be $true
     }
 }

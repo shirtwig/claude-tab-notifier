@@ -34,6 +34,7 @@ $soundEnabled = $true
 $selectedSound = 'classic'
 $customSoundFile = ''
 $selectedEmoji = 'sparkle'
+$emojiEnabled = $true
 $configPath = Join-Path $PSScriptRoot 'config.json'
 if (Test-Path $configPath) {
     try {
@@ -42,6 +43,7 @@ if (Test-Path $configPath) {
         if ($config.selectedSound) { $selectedSound = $config.selectedSound }
         if ($config.customSoundFile) { $customSoundFile = $config.customSoundFile }
         if ($config.selectedEmoji) { $selectedEmoji = $config.selectedEmoji }
+        if ($null -ne $config.emojiEnabled) { $emojiEnabled = [bool]$config.emojiEnabled }
     } catch {
         Write-Host "Claude Tab Notifier: failed to read config.json, using defaults ($($_.Exception.Message))" -ForegroundColor DarkYellow
     }
@@ -187,10 +189,11 @@ Write-Host "State file    : $stateFile"
 Write-Host "Watcher log   : $logFile"
 Write-Host "Sound enabled : $soundEnabled"
 Write-Host "Sound file    : $soundFile"
+Write-Host "Emoji enabled : $emojiEnabled"
 Write-Host ""
 
 $loopScript = {
-    param($stateFile, $originalTitle, $heartbeatFile, $logFile, $soundEnabled, $soundFile, $myPid, $myParentPid, $emojiChar)
+    param($stateFile, $originalTitle, $heartbeatFile, $logFile, $soundEnabled, $soundFile, $myPid, $myParentPid, $emojiChar, $emojiEnabled)
 
     # $Host.UI.RawUI.WindowTitle throws in this background runspace (its default
     # PSHost doesn't implement RawUI -- confirmed via LOOP ERROR log evidence).
@@ -245,7 +248,7 @@ public static extern bool SetConsoleTitleW(string lpConsoleTitle);
             # computed title is instead recorded in the heartbeat entry below,
             # which already overwrites (not appends) every tick for
             # orphan-detection, so this adds no new growth risk.
-            if ($marked) {
+            if ($marked -and $emojiEnabled) {
                 $currentTitle = ($emojiChar * $animPattern[$animFrame]) + " $originalTitle"
                 [ClaudeTabNotifier.Native]::SetConsoleTitleW($currentTitle) | Out-Null
                 $animFrame = ($animFrame + 1) % $animPattern.Count
@@ -271,16 +274,26 @@ public static extern bool SetConsoleTitleW(string lpConsoleTitle);
 
             if ($status -eq 'needsAttention' -and -not $marked) {
                 $marked = $true
+                # $marked (used for the sound-dedup check above and re-checked
+                # on the next 'clear' below) is set unconditionally -- sound
+                # must still dedup/fire correctly even with emoji disabled,
+                # and the title-lifecycle bookkeeping must stay correct even
+                # with sound disabled. Only the actual title-writing below is
+                # conditional on $emojiEnabled.
                 $animFrame = 0
-                # Set frame 0 immediately (same tick as detecting the mark,
-                # matching the previous immediate-set behavior) rather than
-                # waiting for the next tick's animate step above -- then prime
-                # $animFrame so that next tick continues the cycle smoothly
-                # instead of repeating frame 0.
-                $firstFrameTitle = ($emojiChar * $animPattern[0]) + " $originalTitle"
-                [ClaudeTabNotifier.Native]::SetConsoleTitleW($firstFrameTitle) | Out-Null
-                $animFrame = 1 % $animPattern.Count
-                Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] MARKED -> $firstFrameTitle"
+                if ($emojiEnabled) {
+                    # Set frame 0 immediately (same tick as detecting the mark,
+                    # matching the previous immediate-set behavior) rather than
+                    # waiting for the next tick's animate step above -- then prime
+                    # $animFrame so that next tick continues the cycle smoothly
+                    # instead of repeating frame 0.
+                    $firstFrameTitle = ($emojiChar * $animPattern[0]) + " $originalTitle"
+                    [ClaudeTabNotifier.Native]::SetConsoleTitleW($firstFrameTitle) | Out-Null
+                    $animFrame = 1 % $animPattern.Count
+                    Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] MARKED -> $firstFrameTitle"
+                } else {
+                    Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] MARKED (emoji disabled -- title unchanged)"
+                }
 
                 if ($soundEnabled) {
                     try {
@@ -305,9 +318,13 @@ public static extern bool SetConsoleTitleW(string lpConsoleTitle);
                 }
             }
             elseif ($status -eq 'clear' -and $marked) {
-                [ClaudeTabNotifier.Native]::SetConsoleTitleW($originalTitle) | Out-Null
+                if ($emojiEnabled) {
+                    [ClaudeTabNotifier.Native]::SetConsoleTitleW($originalTitle) | Out-Null
+                    Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] CLEARED -> $originalTitle"
+                } else {
+                    Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] CLEARED (emoji disabled -- title unchanged)"
+                }
                 $marked = $false
-                Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] CLEARED -> $originalTitle"
             }
         } catch {
             Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] LOOP ERROR: $($_.Exception.Message)"
@@ -322,7 +339,7 @@ $runspace.Open()
 
 $ps = [powershell]::Create()
 $ps.Runspace = $runspace
-[void]$ps.AddScript($loopScript).AddArgument($stateFile).AddArgument($originalTitle).AddArgument($heartbeatFile).AddArgument($logFile).AddArgument($soundEnabled).AddArgument($soundFile).AddArgument($myPid).AddArgument($myParentPid).AddArgument($emojiChar)
+[void]$ps.AddScript($loopScript).AddArgument($stateFile).AddArgument($originalTitle).AddArgument($heartbeatFile).AddArgument($logFile).AddArgument($soundEnabled).AddArgument($soundFile).AddArgument($myPid).AddArgument($myParentPid).AddArgument($emojiChar).AddArgument($emojiEnabled)
 
 $null = $ps.BeginInvoke()
 

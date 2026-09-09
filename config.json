@@ -2,5 +2,6 @@
   "soundEnabled": true,
   "selectedSound": "classic",
   "customSoundFile": "",
-  "selectedEmoji": "sparkle"
+  "selectedEmoji": "sparkle",
+  "emojiEnabled": true
 }

@@ -24,8 +24,8 @@ function Get-EmojiChar {
 }
 
 function Set-SandboxConfig {
-    param($Sandbox, [bool]$SoundEnabled = $true, [string]$SelectedSound = 'classic', [string]$CustomSoundFile = '', [string]$SelectedEmoji = 'sparkle')
-    $cfg = @{ soundEnabled = $SoundEnabled; selectedSound = $SelectedSound; customSoundFile = $CustomSoundFile; selectedEmoji = $SelectedEmoji }
+    param($Sandbox, [bool]$SoundEnabled = $true, [string]$SelectedSound = 'classic', [string]$CustomSoundFile = '', [string]$SelectedEmoji = 'sparkle', [bool]$EmojiEnabled = $true)
+    $cfg = @{ soundEnabled = $SoundEnabled; selectedSound = $SelectedSound; customSoundFile = $CustomSoundFile; selectedEmoji = $SelectedEmoji; emojiEnabled = $EmojiEnabled }
     ($cfg | ConvertTo-Json -Compress) | Set-Content -Path $Sandbox.ConfigPath -Encoding utf8
 }
 
@@ -325,6 +325,85 @@ Describe "Watcher core behavior (PowerShell)" {
         (Get-HeartbeatEntry -Sandbox $sandbox -WtSession $wt).title | Should Not Be $baseline1
         (Get-HeartbeatEntry -Sandbox $sandbox -WtSession $wt2).title | Should Be $baseline2
     }
+
+    It "emojiEnabled=false: title never changes even when marked, but MARKED still dedups correctly (state lifecycle keeps working)" {
+        Set-SandboxConfig -Sandbox $sandbox -SoundEnabled $false -EmojiEnabled $false
+        Start-IsolatedPsWatcher -Sandbox $sandbox -WtSession $wt | Out-Null
+        $baseline = (Wait-ForHeartbeat -Sandbox $sandbox -WtSession $wt).title
+
+        Write-FakeState -Sandbox $sandbox -WtSession $wt -Status 'needsAttention'
+        (Wait-ForLogLine -Sandbox $sandbox -WtSession $wt -Pattern 'MARKED') | Should Be $true
+        Start-Sleep -Milliseconds 1200
+        # Title stays exactly the baseline the whole time it's marked -- no pulse.
+        (Get-HeartbeatEntry -Sandbox $sandbox -WtSession $wt).title | Should Be $baseline
+
+        # Dedup still works: a second needsAttention write before clearing must
+        # NOT produce a second MARKED line -- proves $marked is still tracked
+        # correctly even though nothing about the title itself ever changes.
+        Write-FakeState -Sandbox $sandbox -WtSession $wt -Status 'needsAttention'
+        Start-Sleep -Milliseconds 800
+        $lines = Get-LogLinesTolerant (Get-WatcherLogPath $sandbox $wt)
+        (@($lines | Where-Object { $_ -match 'MARKED' })).Count | Should Be 1
+
+        Write-FakeState -Sandbox $sandbox -WtSession $wt -Status 'clear'
+        (Wait-ForLogLine -Sandbox $sandbox -WtSession $wt -Pattern 'CLEARED') | Should Be $true
+        (Get-HeartbeatEntry -Sandbox $sandbox -WtSession $wt).title | Should Be $baseline
+
+        # A full second mark->clear cycle still re-triggers cleanly.
+        Write-FakeState -Sandbox $sandbox -WtSession $wt -Status 'needsAttention'
+        $ok = Wait-ForCondition -TimeoutMs 6000 -Condition {
+            $lines = Get-LogLinesTolerant (Get-WatcherLogPath $sandbox $wt)
+            (@($lines | Where-Object { $_ -match 'MARKED' })).Count -ge 2
+        }
+        $ok | Should Be $true
+        (Get-HeartbeatEntry -Sandbox $sandbox -WtSession $wt).title | Should Be $baseline
+    }
+
+    It "emojiEnabled=false + soundEnabled=true: sound still plays even though the title never changes (independence)" {
+        Set-SandboxConfig -Sandbox $sandbox -SoundEnabled $true -SelectedSound 'classic' -EmojiEnabled $false
+        Start-IsolatedPsWatcher -Sandbox $sandbox -WtSession $wt | Out-Null
+        $baseline = (Wait-ForHeartbeat -Sandbox $sandbox -WtSession $wt).title
+
+        Write-FakeState -Sandbox $sandbox -WtSession $wt -Status 'needsAttention'
+        $ok = Wait-ForLogLine -Sandbox $sandbox -WtSession $wt -Pattern ([regex]::Escape("sound played") + '.*classic\.wav')
+        $ok | Should Be $true
+        Start-Sleep -Milliseconds 300
+        (Get-HeartbeatEntry -Sandbox $sandbox -WtSession $wt).title | Should Be $baseline
+    }
+
+    It "soundEnabled=false + emojiEnabled=true: title still pulses even though no sound plays (independence)" {
+        Set-SandboxConfig -Sandbox $sandbox -SoundEnabled $false -SelectedEmoji 'star' -EmojiEnabled $true
+        Start-IsolatedPsWatcher -Sandbox $sandbox -WtSession $wt | Out-Null
+        $baseline = (Wait-ForHeartbeat -Sandbox $sandbox -WtSession $wt).title
+        $glyph = Get-EmojiChar 'star'
+
+        Write-FakeState -Sandbox $sandbox -WtSession $wt -Status 'needsAttention'
+        (Wait-ForLogLine -Sandbox $sandbox -WtSession $wt -Pattern 'MARKED') | Should Be $true
+        Start-Sleep -Milliseconds 700
+        $hb = Get-HeartbeatEntry -Sandbox $sandbox -WtSession $wt
+        $hb.title.EndsWith(" $baseline") | Should Be $true
+        $emojiRun = $hb.title.Substring(0, $hb.title.Length - $baseline.Length - 1)
+        $emojiRun | Should Be ($glyph * ($emojiRun.Length / $glyph.Length))
+
+        Start-Sleep -Milliseconds 800
+        $lines = Get-LogLinesTolerant (Get-WatcherLogPath $sandbox $wt)
+        (@($lines | Where-Object { $_ -match 'sound (played|SKIPPED|FAILED)' })).Count | Should Be 0
+    }
+
+    It "both sound and emoji disabled: no sound lines, no title change, MARKED/CLEARED still fire" {
+        Set-SandboxConfig -Sandbox $sandbox -SoundEnabled $false -EmojiEnabled $false
+        Start-IsolatedPsWatcher -Sandbox $sandbox -WtSession $wt | Out-Null
+        $baseline = (Wait-ForHeartbeat -Sandbox $sandbox -WtSession $wt).title
+
+        Write-FakeState -Sandbox $sandbox -WtSession $wt -Status 'needsAttention'
+        (Wait-ForLogLine -Sandbox $sandbox -WtSession $wt -Pattern 'MARKED') | Should Be $true
+        Write-FakeState -Sandbox $sandbox -WtSession $wt -Status 'clear'
+        (Wait-ForLogLine -Sandbox $sandbox -WtSession $wt -Pattern 'CLEARED') | Should Be $true
+
+        (Get-HeartbeatEntry -Sandbox $sandbox -WtSession $wt).title | Should Be $baseline
+        $lines = Get-LogLinesTolerant (Get-WatcherLogPath $sandbox $wt)
+        (@($lines | Where-Object { $_ -match 'sound (played|SKIPPED|FAILED)' })).Count | Should Be 0
+    }
 }
 
 Describe "Watcher core behavior (CMD)" {
@@ -476,5 +555,36 @@ Describe "Watcher core behavior (CMD)" {
         (Wait-ForLogLine -Sandbox $sandbox -WtSession $wt -Pattern 'CLEARED') | Should Be $true
         Start-Sleep -Milliseconds 700
         (Get-HeartbeatEntry -Sandbox $sandbox -WtSession $wt).title | Should Be $baseline
+    }
+
+    # Core independent-enable/disable behavior for the CMD shell -- not the
+    # full combination sweep (already covered exhaustively for PowerShell
+    # above, and both shells share the exact same gating logic, only
+    # duplicated verbatim per this file's existing convention).
+    It "emojiEnabled=false: title never changes even when marked, but sound and dedup still work" {
+        Set-SandboxConfig -Sandbox $sandbox -SoundEnabled $true -SelectedSound 'classic' -EmojiEnabled $false
+        $started = Start-TrackedCmdWatcher -Sandbox $sandbox -WtSession $wt
+        $baseline = $started.Heartbeat.title
+
+        Write-FakeState -Sandbox $sandbox -WtSession $wt -Status 'needsAttention'
+        $ok = Wait-ForLogLine -Sandbox $sandbox -WtSession $wt -Pattern ([regex]::Escape("sound played") + '.*classic\.wav')
+        $ok | Should Be $true
+        Start-Sleep -Milliseconds 300
+        (Get-HeartbeatEntry -Sandbox $sandbox -WtSession $wt).title | Should Be $baseline
+    }
+
+    It "both sound and emoji disabled: no sound lines, no title change, MARKED/CLEARED still fire" {
+        Set-SandboxConfig -Sandbox $sandbox -SoundEnabled $false -EmojiEnabled $false
+        $started = Start-TrackedCmdWatcher -Sandbox $sandbox -WtSession $wt
+        $baseline = $started.Heartbeat.title
+
+        Write-FakeState -Sandbox $sandbox -WtSession $wt -Status 'needsAttention'
+        (Wait-ForLogLine -Sandbox $sandbox -WtSession $wt -Pattern 'MARKED') | Should Be $true
+        Write-FakeState -Sandbox $sandbox -WtSession $wt -Status 'clear'
+        (Wait-ForLogLine -Sandbox $sandbox -WtSession $wt -Pattern 'CLEARED') | Should Be $true
+
+        (Get-HeartbeatEntry -Sandbox $sandbox -WtSession $wt).title | Should Be $baseline
+        $lines = Get-LogLinesTolerant (Get-WatcherLogPath $sandbox $wt)
+        (@($lines | Where-Object { $_ -match 'sound (played|SKIPPED|FAILED)' })).Count | Should Be 0
     }
 }

@@ -286,32 +286,47 @@ if ($null -eq $soundConfig) {
 if (-not $soundConfig.PSObject.Properties['selectedSound'] -or -not $soundConfig.selectedSound) {
     $soundConfig | Add-Member -MemberType NoteProperty -Name 'selectedSound' -Value 'classic' -Force
 }
+if (-not $soundConfig.PSObject.Properties['soundEnabled']) {
+    $soundConfig | Add-Member -MemberType NoteProperty -Name 'soundEnabled' -Value $true -Force
+}
 # Captured before either step mutates $soundConfig, so Step 4 can tell whether
 # a config.json write is actually needed -- exactly the same comparison basis
 # the original (pre-wizard) code used for each field individually.
 $originalSoundValue = $soundConfig.selectedSound
+$originalSoundEnabledValue = [bool]$soundConfig.soundEnabled
 
 $currentSelected = $soundConfig.selectedSound
 if (-not ($soundKeys -contains $currentSelected) -and $currentSelected -ne 'custom') {
     $currentSelected = 'classic'
 }
-$soundEnabledForPreview = $true
-if ($soundConfig.PSObject.Properties['soundEnabled']) { $soundEnabledForPreview = [bool]$soundConfig.soundEnabled }
+# Used both to gate the preview sub-question below and to mark "(current)"
+# on the "0. No sound" menu line.
+$currentSoundEnabled = $originalSoundEnabledValue
 
+# Sound and its enabled/disabled state are tracked separately: picking "0. No
+# sound" turns notifications off WITHOUT forgetting which sound was selected
+# (so choosing a real sound again later, or re-enabling it, needs no
+# re-selection) -- selectedSound and soundEnabled are independent fields.
 $finalSound = $currentSelected
+$finalSoundEnabled = $originalSoundEnabledValue
 
 if ($SelectedSound) {
-    if ($soundKeys -contains $SelectedSound) {
+    if ($SelectedSound -eq '0') {
+        $finalSoundEnabled = $false
+        Write-Host ""
+        Write-Host "  $glyphCheck sound disabled via -SelectedSound '0' (selectedSound '$finalSound' kept for later)" -ForegroundColor Green
+    } elseif ($soundKeys -contains $SelectedSound) {
         $finalSound = $SelectedSound
+        $finalSoundEnabled = $true
         Write-Host ""
         Write-Host "  $glyphCheck sound set via -SelectedSound: $finalSound" -ForegroundColor Green
     } else {
         Write-Host ""
-        Write-Host "  $glyphCross -SelectedSound '$SelectedSound' is not a recognized sound name -- keeping '$currentSelected'" -ForegroundColor DarkYellow
+        Write-Host "  $glyphCross -SelectedSound '$SelectedSound' is not a recognized sound name -- keeping current setting" -ForegroundColor DarkYellow
     }
 } elseif ($SkipSoundPrompt) {
     Write-Host ""
-    Write-Host "  sound prompt skipped (-SkipSoundPrompt) -- keeping '$currentSelected'"
+    Write-Host "  sound prompt skipped (-SkipSoundPrompt) -- keeping current setting"
 } else {
     # No pre-check via [Console]::In.Peek() here on purpose -- Peek() reads
     # ahead into .NET's own Console.In buffer, which was observed to steal
@@ -325,32 +340,51 @@ if ($SelectedSound) {
             Write-Host ""
             Write-Host "  Available sounds:"
             Write-Host ""
+            $zeroMarker = if (-not $currentSoundEnabled) { "  (current)" } else { '' }
+            Write-Host ("    {0,2}. {1}{2}" -f 0, "No sound -- disable sound notifications (title/emoji still work)", $zeroMarker)
             for ($i = 0; $i -lt $soundKeys.Count; $i++) {
                 $key = $soundKeys[$i]
                 $marker = if ($key -eq $currentSelected) { "  (current)" } else { '' }
                 Write-Host ("    {0,2}. {1}{2}" -f ($i + 1), $soundCatalog[$key], $marker)
             }
             Write-Host ""
-            $raw = Read-Host "  Enter a number (1-$($soundKeys.Count)), or press Enter to keep '$currentSelected'"
+            $raw = Read-Host "  Enter a number (0-$($soundKeys.Count)), or press Enter to keep the current setting"
             if ([string]::IsNullOrWhiteSpace($raw)) {
-                $finalSound = $currentSelected
                 break
             }
 
-            $choiceNum = 0
-            if (-not [int]::TryParse($raw.Trim(), [ref]$choiceNum) -or $choiceNum -lt 1 -or $choiceNum -gt $soundKeys.Count) {
-                Write-Host "  $glyphCross Not a valid choice -- enter a number from 1 to $($soundKeys.Count)." -ForegroundColor Yellow
+            $choiceNum = -1
+            if (-not [int]::TryParse($raw.Trim(), [ref]$choiceNum) -or $choiceNum -lt 0 -or $choiceNum -gt $soundKeys.Count) {
+                Write-Host "  $glyphCross Not a valid choice -- enter a number from 0 to $($soundKeys.Count)." -ForegroundColor Yellow
                 continue
+            }
+
+            if ($choiceNum -eq 0) {
+                Write-Host ""
+                Write-Box -Lines @(
+                    "Sound disabled",
+                    "",
+                    "  Notifications will be silent.",
+                    "  Title/emoji marking still works",
+                    "  independently.",
+                    ""
+                )
+                Write-Host ""
+                $confirmAnswer = Read-Host "  Use this setting? [Y] Yes   [N] Choose another"
+                if ($confirmAnswer -match '^(n|no)$') { continue }
+
+                $finalSoundEnabled = $false
+                break
             }
 
             $candidate = $soundKeys[$choiceNum - 1]
             $candidateLabel = $soundCatalog[$candidate]
             $candidateShortName = ($candidateLabel -split ' -- ')[0]
 
-            $shouldPreview = $soundEnabledForPreview
-            if (-not $soundEnabledForPreview) {
+            $shouldPreview = $currentSoundEnabled
+            if (-not $currentSoundEnabled) {
                 Write-Host ""
-                $previewAnswer = Read-Host "  Sound is currently disabled in config.json. Preview '$candidateShortName' anyway? (y/N)"
+                $previewAnswer = Read-Host "  Sound is currently disabled. Preview '$candidateShortName' anyway? (y/N)"
                 $shouldPreview = ($previewAnswer -match '^(y|yes)$')
             }
 
@@ -376,17 +410,18 @@ if ($SelectedSound) {
             if ($confirmAnswer -match '^(n|no)$') { continue }
 
             $finalSound = $candidate
+            $finalSoundEnabled = $true
             break
         }
     } catch {
         Write-Host ""
-        Write-Host "  no interactive input available -- keeping '$currentSelected'" -ForegroundColor DarkYellow
-        $finalSound = $currentSelected
+        Write-Host "  no interactive input available -- keeping current setting" -ForegroundColor DarkYellow
     }
 }
 
-if ($finalSound -ne $soundConfig.selectedSound) {
+if ($finalSound -ne $originalSoundValue -or $finalSoundEnabled -ne $originalSoundEnabledValue) {
     $soundConfig.selectedSound = $finalSound
+    $soundConfig.soundEnabled = $finalSoundEnabled
 } else {
     Write-Host ""
     Write-Host "  selectedSound unchanged ('$finalSound')"
@@ -428,25 +463,39 @@ $emojiKeys = @($emojiCatalog.Keys)
 if (-not $soundConfig.PSObject.Properties['selectedEmoji'] -or -not $soundConfig.selectedEmoji) {
     $soundConfig | Add-Member -MemberType NoteProperty -Name 'selectedEmoji' -Value 'sparkle' -Force
 }
-# Same reasoning as $originalSoundValue above.
+if (-not $soundConfig.PSObject.Properties['emojiEnabled']) {
+    $soundConfig | Add-Member -MemberType NoteProperty -Name 'emojiEnabled' -Value $true -Force
+}
+# Same reasoning as $originalSoundValue/$originalSoundEnabledValue above.
 $originalEmojiValue = $soundConfig.selectedEmoji
+$originalEmojiEnabledValue = [bool]$soundConfig.emojiEnabled
 $currentEmoji = $soundConfig.selectedEmoji
 if (-not ($emojiKeys -contains $currentEmoji)) { $currentEmoji = 'sparkle' }
+$currentEmojiEnabled = $originalEmojiEnabledValue
 
+# Emoji and its enabled/disabled state are tracked separately, exactly like
+# sound above: picking "0. No emoji" turns pulsing off WITHOUT forgetting
+# which emoji was selected.
 $finalEmoji = $currentEmoji
+$finalEmojiEnabled = $originalEmojiEnabledValue
 
 if ($SelectedEmoji) {
-    if ($emojiKeys -contains $SelectedEmoji) {
+    if ($SelectedEmoji -eq '0') {
+        $finalEmojiEnabled = $false
+        Write-Host ""
+        Write-Host "  $glyphCheck emoji disabled via -SelectedEmoji '0' (selectedEmoji '$finalEmoji' kept for later)" -ForegroundColor Green
+    } elseif ($emojiKeys -contains $SelectedEmoji) {
         $finalEmoji = $SelectedEmoji
+        $finalEmojiEnabled = $true
         Write-Host ""
         Write-Host "  $glyphCheck emoji set via -SelectedEmoji: $finalEmoji" -ForegroundColor Green
     } else {
         Write-Host ""
-        Write-Host "  $glyphCross -SelectedEmoji '$SelectedEmoji' is not a recognized emoji name -- keeping '$currentEmoji'" -ForegroundColor DarkYellow
+        Write-Host "  $glyphCross -SelectedEmoji '$SelectedEmoji' is not a recognized emoji name -- keeping current setting" -ForegroundColor DarkYellow
     }
 } elseif ($SkipEmojiPrompt) {
     Write-Host ""
-    Write-Host "  emoji prompt skipped (-SkipEmojiPrompt) -- keeping '$currentEmoji'"
+    Write-Host "  emoji prompt skipped (-SkipEmojiPrompt) -- keeping current setting"
 } else {
     # Same try/catch safety net as the sound prompt above (no Console.In.Peek()
     # pre-check -- see its comment for why).
@@ -455,6 +504,8 @@ if ($SelectedEmoji) {
             Write-Host ""
             Write-Host "  Available emoji:"
             Write-Host ""
+            $zeroMarker = if (-not $currentEmojiEnabled) { "  (current)" } else { '' }
+            Write-Host ("    {0,2}. {1}{2}" -f 0, "No emoji -- disable title pulsing (sound still works)", $zeroMarker)
             for ($i = 0; $i -lt $emojiKeys.Count; $i++) {
                 $key = $emojiKeys[$i]
                 $glyph = -join ($emojiCatalog[$key].Codepoints | ForEach-Object { [System.Char]::ConvertFromUtf32($_) })
@@ -462,16 +513,32 @@ if ($SelectedEmoji) {
                 Write-Host ("    {0,2}. {1}  {2}{3}" -f ($i + 1), $glyph, $emojiCatalog[$key].Name, $marker)
             }
             Write-Host ""
-            $rawEmoji = Read-Host "  Enter a number (1-$($emojiKeys.Count)), or press Enter to keep '$currentEmoji'"
+            $rawEmoji = Read-Host "  Enter a number (0-$($emojiKeys.Count)), or press Enter to keep the current setting"
             if ([string]::IsNullOrWhiteSpace($rawEmoji)) {
-                $finalEmoji = $currentEmoji
                 break
             }
 
-            $emojiChoiceNum = 0
-            if (-not [int]::TryParse($rawEmoji.Trim(), [ref]$emojiChoiceNum) -or $emojiChoiceNum -lt 1 -or $emojiChoiceNum -gt $emojiKeys.Count) {
-                Write-Host "  $glyphCross Not a valid choice -- enter a number from 1 to $($emojiKeys.Count)." -ForegroundColor Yellow
+            $emojiChoiceNum = -1
+            if (-not [int]::TryParse($rawEmoji.Trim(), [ref]$emojiChoiceNum) -or $emojiChoiceNum -lt 0 -or $emojiChoiceNum -gt $emojiKeys.Count) {
+                Write-Host "  $glyphCross Not a valid choice -- enter a number from 0 to $($emojiKeys.Count)." -ForegroundColor Yellow
                 continue
+            }
+
+            if ($emojiChoiceNum -eq 0) {
+                Write-Host ""
+                Write-Box -Lines @(
+                    "Emoji disabled",
+                    "",
+                    "  The tab title will not pulse.",
+                    "  Sound still works independently.",
+                    ""
+                )
+                Write-Host ""
+                $confirmAnswer = Read-Host "  Use this setting? [Y] Yes   [N] Choose another"
+                if ($confirmAnswer -match '^(n|no)$') { continue }
+
+                $finalEmojiEnabled = $false
+                break
             }
 
             $candidateKey = $emojiKeys[$emojiChoiceNum - 1]
@@ -494,17 +561,18 @@ if ($SelectedEmoji) {
             if ($confirmAnswer -match '^(n|no)$') { continue }
 
             $finalEmoji = $candidateKey
+            $finalEmojiEnabled = $true
             break
         }
     } catch {
         Write-Host ""
-        Write-Host "  no interactive input available -- keeping '$currentEmoji'" -ForegroundColor DarkYellow
-        $finalEmoji = $currentEmoji
+        Write-Host "  no interactive input available -- keeping current setting" -ForegroundColor DarkYellow
     }
 }
 
-if ($finalEmoji -ne $soundConfig.selectedEmoji) {
+if ($finalEmoji -ne $originalEmojiValue -or $finalEmojiEnabled -ne $originalEmojiEnabledValue) {
     $soundConfig.selectedEmoji = $finalEmoji
+    $soundConfig.emojiEnabled = $finalEmojiEnabled
 } else {
     Write-Host ""
     Write-Host "  selectedEmoji unchanged ('$finalEmoji')"
@@ -661,7 +729,8 @@ Write-GroupResult "Installing hooks" @("settings.json contains all 3 hooks")
 # like the original (pre-wizard) code: an unchanged re-install must leave
 # config.json completely untouched (no rewrite, no touched mtime), not just
 # unchanged in value.
-if ($finalSound -ne $originalSoundValue -or $finalEmoji -ne $originalEmojiValue) {
+if ($finalSound -ne $originalSoundValue -or $finalSoundEnabled -ne $originalSoundEnabledValue -or
+    $finalEmoji -ne $originalEmojiValue -or $finalEmojiEnabled -ne $originalEmojiEnabledValue) {
     $soundConfig | ConvertTo-Json -Depth 5 | Set-Content -Path $deployedConfigPath -Encoding utf8
 }
 
@@ -718,15 +787,36 @@ if ($allOk) {
 if ($allOk) {
     Write-Banner "$glyphParty ALL DONE!" "Claude Tab Notifier is installed"
     $soundDisplayName = if ($soundCatalog.Contains($finalSound)) { ($soundCatalog[$finalSound] -split ' -- ')[0] } else { $finalSound }
-    Write-Host "Selected sound: $soundDisplayName"
-    Write-Host "Selected emoji: $($emojiCatalog[$finalEmoji].Name)"
+    $emojiDisplayName = $emojiCatalog[$finalEmoji].Name
+    if ($finalSoundEnabled) {
+        Write-Host "Selected sound: $soundDisplayName"
+    } else {
+        Write-Host "Selected sound: (disabled -- $soundDisplayName kept for later)"
+    }
+    if ($finalEmojiEnabled) {
+        Write-Host "Selected emoji: $emojiDisplayName"
+    } else {
+        Write-Host "Selected emoji: (disabled -- $emojiDisplayName kept for later)"
+    }
     Write-Host ""
     Write-Host "Open a NEW Windows Terminal tab and run:"
     Write-Host ""
     Write-Host "    claude" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "You'll see the tab title pulse with your chosen emoji, and hear your"
-    Write-Host "chosen sound, whenever Claude finishes responding or needs your input."
+    if ($finalSoundEnabled -and $finalEmojiEnabled) {
+        Write-Host "You'll see the tab title pulse with your chosen emoji, and hear your"
+        Write-Host "chosen sound, whenever Claude finishes responding or needs your input."
+    } elseif ($finalEmojiEnabled) {
+        Write-Host "You'll see the tab title pulse with your chosen emoji whenever Claude"
+        Write-Host "finishes responding or needs your input. Sound is disabled."
+    } elseif ($finalSoundEnabled) {
+        Write-Host "You'll hear your chosen sound whenever Claude finishes responding or"
+        Write-Host "needs your input. Title/emoji marking is disabled."
+    } else {
+        Write-Host "Sound and emoji marking are both disabled. The watcher still tracks"
+        Write-Host "when Claude needs your attention -- re-run the installer any time to"
+        Write-Host "turn either one back on."
+    }
     exit 0
 } else {
     Write-Host ""
