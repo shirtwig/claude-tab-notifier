@@ -2,7 +2,10 @@
 # Deploys the hook, watcher, sound assets, and wires Claude Code hooks + settings +
 # $PROFILE auto-start. Safe to run multiple times: every step checks for an existing
 # installation before changing anything, and only backs up a file when it is actually
-# about to be modified.
+# about to be modified. Presented to an interactive user as a 4-step wizard (Environment,
+# Sound, Emoji, Installing); the underlying actions and their order are unchanged from
+# before the wizard UI existed -- this file only changes what gets printed and, for the
+# emoji step, adds the same confirm-before-saving question the sound step already had.
 #
 # The parameters below default to the exact real paths this installer has always
 # used -- running it with no arguments is byte-identical to before. They exist
@@ -54,6 +57,84 @@ $hookCommands = [ordered]@{
 $profileMarkerStart = '# --- Claude Tab Notifier: auto-start watcher ---'
 $profileMarkerEnd   = '# --- end Claude Tab Notifier ---'
 
+# Whether THIS run could possibly need to read from the console at all. Both
+# sound and emoji default to being genuinely interactive; either one becomes
+# non-interactive the moment it's given an explicit selection or told to skip.
+# Used only to decide whether to show the purely-cosmetic "press ENTER to
+# continue" pause below -- never changes what gets installed.
+$soundIsInteractive = (-not $SelectedSound) -and (-not $SkipSoundPrompt)
+$emojiIsInteractive = (-not $SelectedEmoji) -and (-not $SkipEmojiPrompt)
+$anyInteractive     = $soundIsInteractive -or $emojiIsInteractive
+
+# Decorative glyphs built via ConvertFromUtf32/char-codes rather than embedded
+# literally in this source file -- same reasoning as the emoji catalog below:
+# avoids any source-encoding pitfall for a file that already has to handle a
+# folder path with non-ASCII characters in it correctly.
+$glyphCheck  = [char]0x2713   # check mark
+$glyphCross  = [char]0x2717   # ballot X
+$glyphPlay   = [char]0x25B6   # play triangle
+$glyphBullet = [char]0x2022   # bullet
+$glyphSparkle = [char]0x2728  # sparkle, decorative use only (banner text)
+$glyphParty   = [System.Char]::ConvertFromUtf32(0x1F389) # party popper, banner only
+
+function Write-Banner {
+    param([string]$Line1, [string]$Line2)
+    $h  = [char]0x2550   # =
+    $v  = [char]0x2551   # |
+    $tl = [char]0x2554   # top-left corner
+    $tr = [char]0x2557   # top-right corner
+    $bl = [char]0x255A   # bottom-left corner
+    $br = [char]0x255D   # bottom-right corner
+    $width = 56
+
+    function Pad-Center([string]$Text, [int]$Width) {
+        $total = $Width - $Text.Length
+        if ($total -lt 0) { return $Text.Substring(0, $Width) }
+        $left = [Math]::Floor($total / 2)
+        $right = $total - $left
+        return (' ' * $left) + $Text + (' ' * $right)
+    }
+
+    $hLine = "$h" * $width
+    Write-Host ""
+    Write-Host ("$tl" + $hLine + "$tr") -ForegroundColor Cyan
+    Write-Host ("$v" + (' ' * $width) + "$v") -ForegroundColor Cyan
+    Write-Host ("$v" + (Pad-Center $Line1 $width) + "$v") -ForegroundColor Cyan
+    if ($Line2) {
+        Write-Host ("$v" + (' ' * $width) + "$v") -ForegroundColor Cyan
+        Write-Host ("$v" + (Pad-Center $Line2 $width) + "$v") -ForegroundColor Cyan
+    }
+    Write-Host ("$v" + (' ' * $width) + "$v") -ForegroundColor Cyan
+    Write-Host ("$bl" + $hLine + "$br") -ForegroundColor Cyan
+    Write-Host ""
+}
+
+function Write-StepHeader {
+    param([int]$Step, [int]$Total, [string]$Title)
+    Write-Host ""
+    Write-Host "Step $Step of $Total $glyphBullet $Title" -ForegroundColor Cyan
+    Write-Host ("-" * 50) -ForegroundColor DarkGray
+    Write-Host ""
+}
+
+function Write-Box {
+    # A simple fixed-width info box -- content lines are pre-formatted by the
+    # caller (this just draws the border); used for the sound/emoji selection
+    # confirmation screens.
+    param([string[]]$Lines, [int]$Width = 54)
+    $tl = [char]0x250C; $tr = [char]0x2510; $bl = [char]0x2514; $br = [char]0x2518
+    $h = [char]0x2500; $v = [char]0x2502
+    $hLine = "$h" * $Width
+    Write-Host ("$tl" + $hLine + "$tr") -ForegroundColor DarkCyan
+    foreach ($line in $Lines) {
+        $padded = $line
+        if ($padded.Length -gt $Width - 2) { $padded = $padded.Substring(0, $Width - 2) }
+        $padded = $padded + (' ' * ($Width - 2 - $padded.Length))
+        Write-Host ("$v " + $padded + " $v") -ForegroundColor DarkCyan
+    }
+    Write-Host ("$bl" + $hLine + "$br") -ForegroundColor DarkCyan
+}
+
 function Backup-FileIfExists {
     param([string]$Path)
     if (Test-Path $Path) {
@@ -65,26 +146,57 @@ function Backup-FileIfExists {
     return $null
 }
 
-Write-Host "=== Claude Tab Notifier -- installer ===" -ForegroundColor Cyan
+# --- Step 1 of 4: Environment ---
+Write-Banner "$glyphSparkle CLAUDE TAB NOTIFIER $glyphSparkle" "Installation Wizard"
+Write-StepHeader 1 4 "Environment"
+
+Write-Host "Checking your environment..."
 Write-Host ""
 
-# --- 1. build and deploy the hook exe ---
+# Purely informational -- neither of these two checks blocks the install by
+# itself. The one hard requirement (the .NET SDK, when no -SourceExePath is
+# given) is still enforced exactly where it always was, at the actual build
+# step below; $dotnetCmd is computed once, here, and reused there so the
+# check itself isn't duplicated.
+$dotnetCmd = Get-Command dotnet -ErrorAction SilentlyContinue
+if ($SourceExePath -or $dotnetCmd) {
+    Write-Host "  $glyphCheck .NET SDK detected" -ForegroundColor Green
+} else {
+    Write-Host "  $glyphCross .NET SDK not found on PATH" -ForegroundColor Red
+}
+
+$claudeCmd = Get-Command claude -ErrorAction SilentlyContinue
+if ($claudeCmd) {
+    Write-Host "  $glyphCheck Claude Code CLI detected" -ForegroundColor Green
+} else {
+    Write-Host "  $glyphCross Claude Code CLI not found on PATH (you can still install now and run 'claude' later)" -ForegroundColor DarkYellow
+}
+
+Write-Host "  $glyphCheck PowerShell $($PSVersionTable.PSVersion) detected" -ForegroundColor Green
+Write-Host ""
+Write-Host "Environment ready." -ForegroundColor Green
+
+if ($anyInteractive) {
+    try { Read-Host "Press ENTER to continue" | Out-Null } catch {}
+}
+
+# --- build and deploy the hook exe ---
 if ($SourceExePath) {
-    Write-Host "[1/7] Deploying provided hook exe (build skipped: -SourceExePath given) ..." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Deploying provided hook exe (build skipped: -SourceExePath given) ..." -ForegroundColor Yellow
     if (-not (Test-Path $SourceExePath)) {
-        Write-Host "[FAIL] -SourceExePath not found: $SourceExePath" -ForegroundColor Red
+        Write-Host "$glyphCross -SourceExePath not found: $SourceExePath" -ForegroundColor Red
         exit 1
     }
     New-Item -ItemType Directory -Path $toolsDir -Force | Out-Null
     Copy-Item -Path $SourceExePath -Destination $exeDeployPath -Force
     Unblock-File -Path $exeDeployPath
     Write-Host "  deployed: $exeDeployPath"
-    Write-Host ""
 } else {
-    Write-Host "[1/7] Building ClaudeAttention.exe ..." -ForegroundColor Yellow
-    $dotnetCmd = Get-Command dotnet -ErrorAction SilentlyContinue
+    Write-Host ""
+    Write-Host "Building ClaudeAttention.exe ..." -ForegroundColor Yellow
     if (-not $dotnetCmd) {
-        Write-Host "[FAIL] dotnet CLI not found on PATH. Install the .NET SDK first." -ForegroundColor Red
+        Write-Host "$glyphCross dotnet CLI not found on PATH. Install the .NET SDK first." -ForegroundColor Red
         exit 1
     }
 
@@ -97,7 +209,7 @@ if ($SourceExePath) {
 
     $publishedExe = Join-Path $PSScriptRoot 'bin\Release\net9.0-windows\win-x64\publish\ClaudeAttention.exe'
     if (-not (Test-Path $publishedExe)) {
-        Write-Host "[FAIL] Expected published exe not found at: $publishedExe" -ForegroundColor Red
+        Write-Host "$glyphCross Expected published exe not found at: $publishedExe" -ForegroundColor Red
         exit 1
     }
 
@@ -105,11 +217,9 @@ if ($SourceExePath) {
     Copy-Item -Path $publishedExe -Destination $exeDeployPath -Force
     Unblock-File -Path $exeDeployPath
     Write-Host "  deployed: $exeDeployPath"
-    Write-Host ""
 }
 
-# --- 2. deploy watcher, sound, config assets ---
-Write-Host "[2/7] Deploying watcher and sound assets ..." -ForegroundColor Yellow
+# --- deploy watcher, sound, config assets ---
 New-Item -ItemType Directory -Path $soundsDeployDir -Force | Out-Null
 
 Copy-Item -Path (Join-Path $PSScriptRoot 'watcher-background.ps1') -Destination (Join-Path $deployDir 'watcher-background.ps1') -Force
@@ -120,14 +230,10 @@ $soundAssets = Get-ChildItem -Path $soundsSourceDir -File
 foreach ($asset in $soundAssets) {
     Copy-Item -Path $asset.FullName -Destination (Join-Path $soundsDeployDir $asset.Name) -Force
 }
-Write-Host "  deployed: watcher-background.ps1, test-sound.ps1, $($soundAssets.Count) files in sounds\ ($($soundAssets.Name -join ', '))"
 
 $deployedConfigPath = Join-Path $deployDir 'config.json'
 if (-not (Test-Path $deployedConfigPath)) {
     Copy-Item -Path (Join-Path $PSScriptRoot 'config.json') -Destination $deployedConfigPath -Force
-    Write-Host "  deployed: config.json (fresh copy)"
-} else {
-    Write-Host "  config.json already exists at deployment location -- left untouched (preserves any customization)"
 }
 
 # A user who installs from a downloaded GitHub ZIP (rather than a git clone)
@@ -141,11 +247,16 @@ if (-not (Test-Path $deployedConfigPath)) {
 # that were never tagged (e.g. a git-clone install), and does not touch the
 # user's system-wide execution policy at all.
 Get-ChildItem -Path $deployDir -Recurse -File | Unblock-File
-Write-Host "  unblocked deployed files (removes 'Mark of the Web' from a downloaded ZIP, if present)"
-Write-Host ""
 
-# --- 3. choose notification sound ---
-Write-Host "[3/7] Choosing notification sound ..." -ForegroundColor Yellow
+Write-Host "  watcher, sound files, and config deployed"
+
+# --- Step 2 of 4: Notification Sound ---
+Write-StepHeader 2 4 "Notification Sound"
+
+Write-Host "Choose the sound you want to hear when Claude"
+Write-Host "finishes and needs your attention."
+Write-Host ""
+Write-Host "You can preview any sound before choosing it."
 
 $soundCatalog = [ordered]@{
     classic = 'Classic -- two-tone chime'
@@ -166,7 +277,8 @@ $soundConfig = $null
 try {
     $soundConfig = Get-Content $deployedConfigPath -Raw | ConvertFrom-Json
 } catch {
-    Write-Host "  config.json is missing or invalid -- using defaults for sound selection" -ForegroundColor DarkYellow
+    Write-Host ""
+    Write-Host "  $glyphCross config.json is missing or invalid -- using defaults for sound selection" -ForegroundColor DarkYellow
 }
 if ($null -eq $soundConfig) {
     $soundConfig = [PSCustomObject]@{ soundEnabled = $true; selectedSound = 'classic'; customSoundFile = '' }
@@ -174,6 +286,10 @@ if ($null -eq $soundConfig) {
 if (-not $soundConfig.PSObject.Properties['selectedSound'] -or -not $soundConfig.selectedSound) {
     $soundConfig | Add-Member -MemberType NoteProperty -Name 'selectedSound' -Value 'classic' -Force
 }
+# Captured before either step mutates $soundConfig, so Step 4 can tell whether
+# a config.json write is actually needed -- exactly the same comparison basis
+# the original (pre-wizard) code used for each field individually.
+$originalSoundValue = $soundConfig.selectedSound
 
 $currentSelected = $soundConfig.selectedSound
 if (-not ($soundKeys -contains $currentSelected) -and $currentSelected -ne 'custom') {
@@ -187,11 +303,14 @@ $finalSound = $currentSelected
 if ($SelectedSound) {
     if ($soundKeys -contains $SelectedSound) {
         $finalSound = $SelectedSound
-        Write-Host "  sound set via -SelectedSound: $finalSound"
+        Write-Host ""
+        Write-Host "  $glyphCheck sound set via -SelectedSound: $finalSound" -ForegroundColor Green
     } else {
-        Write-Host "  -SelectedSound '$SelectedSound' is not a recognized sound name -- keeping '$currentSelected'" -ForegroundColor DarkYellow
+        Write-Host ""
+        Write-Host "  $glyphCross -SelectedSound '$SelectedSound' is not a recognized sound name -- keeping '$currentSelected'" -ForegroundColor DarkYellow
     }
 } elseif ($SkipSoundPrompt) {
+    Write-Host ""
     Write-Host "  sound prompt skipped (-SkipSoundPrompt) -- keeping '$currentSelected'"
 } else {
     # No pre-check via [Console]::In.Peek() here on purpose -- Peek() reads
@@ -204,12 +323,14 @@ if ($SelectedSound) {
     try {
         while ($true) {
             Write-Host ""
-            Write-Host "  Choose a notification sound:"
+            Write-Host "  Available sounds:"
+            Write-Host ""
             for ($i = 0; $i -lt $soundKeys.Count; $i++) {
                 $key = $soundKeys[$i]
-                $marker = if ($key -eq $currentSelected) { '  (current)' } else { '' }
+                $marker = if ($key -eq $currentSelected) { "  (current)" } else { '' }
                 Write-Host ("    {0,2}. {1}{2}" -f ($i + 1), $soundCatalog[$key], $marker)
             }
+            Write-Host ""
             $raw = Read-Host "  Enter a number (1-$($soundKeys.Count)), or press Enter to keep '$currentSelected'"
             if ([string]::IsNullOrWhiteSpace($raw)) {
                 $finalSound = $currentSelected
@@ -218,32 +339,47 @@ if ($SelectedSound) {
 
             $choiceNum = 0
             if (-not [int]::TryParse($raw.Trim(), [ref]$choiceNum) -or $choiceNum -lt 1 -or $choiceNum -gt $soundKeys.Count) {
-                Write-Host "    Not a valid choice -- enter a number from 1 to $($soundKeys.Count)." -ForegroundColor Yellow
+                Write-Host "  $glyphCross Not a valid choice -- enter a number from 1 to $($soundKeys.Count)." -ForegroundColor Yellow
                 continue
             }
 
             $candidate = $soundKeys[$choiceNum - 1]
+            $candidateLabel = $soundCatalog[$candidate]
+            $candidateShortName = ($candidateLabel -split ' -- ')[0]
 
             $shouldPreview = $soundEnabledForPreview
             if (-not $soundEnabledForPreview) {
-                $previewAnswer = Read-Host "  Sound is currently disabled. Preview '$($soundCatalog[$candidate])' anyway? (y/N)"
+                Write-Host ""
+                $previewAnswer = Read-Host "  Sound is currently disabled in config.json. Preview '$candidateShortName' anyway? (y/N)"
                 $shouldPreview = ($previewAnswer -match '^(y|yes)$')
             }
+
+            Write-Host ""
+            Write-Box -Lines @(
+                "Selected sound",
+                "",
+                "  $candidateShortName",
+                ""
+            )
+
             if ($shouldPreview -and (Test-Path $testSoundPath)) {
+                Write-Host "  $glyphPlay Playing preview..." -ForegroundColor Cyan
                 try {
                     & $testSoundPath -Sound $candidate | Out-Null
                 } catch {
-                    Write-Host "    (preview failed: $($_.Exception.Message))" -ForegroundColor DarkYellow
+                    Write-Host "  (preview failed: $($_.Exception.Message))" -ForegroundColor DarkYellow
                 }
             }
 
-            $confirmAnswer = Read-Host "  Use '$($soundCatalog[$candidate])' for notifications? (Y/n)"
+            Write-Host ""
+            $confirmAnswer = Read-Host "  Use this sound for notifications? [Y] Yes   [N] Choose another"
             if ($confirmAnswer -match '^(n|no)$') { continue }
 
             $finalSound = $candidate
             break
         }
     } catch {
+        Write-Host ""
         Write-Host "  no interactive input available -- keeping '$currentSelected'" -ForegroundColor DarkYellow
         $finalSound = $currentSelected
     }
@@ -251,15 +387,17 @@ if ($SelectedSound) {
 
 if ($finalSound -ne $soundConfig.selectedSound) {
     $soundConfig.selectedSound = $finalSound
-    $soundConfig | ConvertTo-Json -Depth 5 | Set-Content -Path $deployedConfigPath -Encoding utf8
-    Write-Host "  selectedSound set to '$finalSound'"
 } else {
+    Write-Host ""
     Write-Host "  selectedSound unchanged ('$finalSound')"
 }
-Write-Host ""
 
-# --- 4. choose attention emoji ---
-Write-Host "[4/7] Choosing attention emoji ..." -ForegroundColor Yellow
+# --- Step 3 of 4: Attention Emoji ---
+Write-StepHeader 3 4 "Attention Emoji"
+
+Write-Host "Choose the emoji that will appear and pulse"
+Write-Host "in your Windows Terminal tab when Claude"
+Write-Host "needs your attention."
 
 # Display glyphs are built the same way as watcher-background.ps1 resolves
 # them at runtime (ConvertFromUtf32 from a Codepoints array, almost always
@@ -282,12 +420,16 @@ $emojiCatalog = [ordered]@{
 }
 $emojiKeys = @($emojiCatalog.Keys)
 
-# $soundConfig already reflects the latest on-disk state (including the
-# selectedSound write just above) -- reused here rather than re-reading the
-# file, so both steps write through the same in-memory object.
+# $soundConfig already reflects the latest in-memory selection (including the
+# selectedSound change just above, not yet written to disk) -- reused here
+# rather than re-reading the file, so both steps update through the same
+# object; the actual config.json write happens once, in Step 4, after both
+# choices are final.
 if (-not $soundConfig.PSObject.Properties['selectedEmoji'] -or -not $soundConfig.selectedEmoji) {
     $soundConfig | Add-Member -MemberType NoteProperty -Name 'selectedEmoji' -Value 'sparkle' -Force
 }
+# Same reasoning as $originalSoundValue above.
+$originalEmojiValue = $soundConfig.selectedEmoji
 $currentEmoji = $soundConfig.selectedEmoji
 if (-not ($emojiKeys -contains $currentEmoji)) { $currentEmoji = 'sparkle' }
 
@@ -296,27 +438,30 @@ $finalEmoji = $currentEmoji
 if ($SelectedEmoji) {
     if ($emojiKeys -contains $SelectedEmoji) {
         $finalEmoji = $SelectedEmoji
-        Write-Host "  emoji set via -SelectedEmoji: $finalEmoji"
+        Write-Host ""
+        Write-Host "  $glyphCheck emoji set via -SelectedEmoji: $finalEmoji" -ForegroundColor Green
     } else {
-        Write-Host "  -SelectedEmoji '$SelectedEmoji' is not a recognized emoji name -- keeping '$currentEmoji'" -ForegroundColor DarkYellow
+        Write-Host ""
+        Write-Host "  $glyphCross -SelectedEmoji '$SelectedEmoji' is not a recognized emoji name -- keeping '$currentEmoji'" -ForegroundColor DarkYellow
     }
 } elseif ($SkipEmojiPrompt) {
+    Write-Host ""
     Write-Host "  emoji prompt skipped (-SkipEmojiPrompt) -- keeping '$currentEmoji'"
 } else {
     # Same try/catch safety net as the sound prompt above (no Console.In.Peek()
-    # pre-check -- see its comment for why). No preview here: unlike sound,
-    # there is nothing to play, and a glyph is either legible in this console
-    # or it isn't -- an extra confirm step would just be friction.
+    # pre-check -- see its comment for why).
     try {
         while ($true) {
             Write-Host ""
-            Write-Host "  Choose an attention emoji:"
+            Write-Host "  Available emoji:"
+            Write-Host ""
             for ($i = 0; $i -lt $emojiKeys.Count; $i++) {
                 $key = $emojiKeys[$i]
                 $glyph = -join ($emojiCatalog[$key].Codepoints | ForEach-Object { [System.Char]::ConvertFromUtf32($_) })
-                $marker = if ($key -eq $currentEmoji) { '  (current)' } else { '' }
+                $marker = if ($key -eq $currentEmoji) { "  (current)" } else { '' }
                 Write-Host ("    {0,2}. {1}  {2}{3}" -f ($i + 1), $glyph, $emojiCatalog[$key].Name, $marker)
             }
+            Write-Host ""
             $rawEmoji = Read-Host "  Enter a number (1-$($emojiKeys.Count)), or press Enter to keep '$currentEmoji'"
             if ([string]::IsNullOrWhiteSpace($rawEmoji)) {
                 $finalEmoji = $currentEmoji
@@ -325,14 +470,34 @@ if ($SelectedEmoji) {
 
             $emojiChoiceNum = 0
             if (-not [int]::TryParse($rawEmoji.Trim(), [ref]$emojiChoiceNum) -or $emojiChoiceNum -lt 1 -or $emojiChoiceNum -gt $emojiKeys.Count) {
-                Write-Host "    Not a valid choice -- enter a number from 1 to $($emojiKeys.Count)." -ForegroundColor Yellow
+                Write-Host "  $glyphCross Not a valid choice -- enter a number from 1 to $($emojiKeys.Count)." -ForegroundColor Yellow
                 continue
             }
 
-            $finalEmoji = $emojiKeys[$emojiChoiceNum - 1]
+            $candidateKey = $emojiKeys[$emojiChoiceNum - 1]
+            $candidateGlyph = -join ($emojiCatalog[$candidateKey].Codepoints | ForEach-Object { [System.Char]::ConvertFromUtf32($_) })
+            $candidateName = $emojiCatalog[$candidateKey].Name
+
+            Write-Host ""
+            Write-Box -Lines @(
+                "Selected emoji",
+                "",
+                "  $candidateGlyph  $candidateName",
+                "",
+                "This emoji will appear and pulse in your tab",
+                "title while Claude needs your attention.",
+                ""
+            )
+
+            Write-Host ""
+            $confirmAnswer = Read-Host "  Use this emoji? [Y] Yes   [N] Choose another"
+            if ($confirmAnswer -match '^(n|no)$') { continue }
+
+            $finalEmoji = $candidateKey
             break
         }
     } catch {
+        Write-Host ""
         Write-Host "  no interactive input available -- keeping '$currentEmoji'" -ForegroundColor DarkYellow
         $finalEmoji = $currentEmoji
     }
@@ -340,16 +505,58 @@ if ($SelectedEmoji) {
 
 if ($finalEmoji -ne $soundConfig.selectedEmoji) {
     $soundConfig.selectedEmoji = $finalEmoji
-    $soundConfig | ConvertTo-Json -Depth 5 | Set-Content -Path $deployedConfigPath -Encoding utf8
-    Write-Host "  selectedEmoji set to '$finalEmoji'"
 } else {
+    Write-Host ""
     Write-Host "  selectedEmoji unchanged ('$finalEmoji')"
 }
-Write-Host ""
 
-# --- 5. merge into settings.json (hooks + env), with manifest tracking for the env key ---
-Write-Host "[5/7] Updating Claude Code settings.json ..." -ForegroundColor Yellow
+# --- Step 4 of 4: Installing ---
+Write-StepHeader 4 4 "Installing"
 
+# The exe and watcher/sound/config assets were already deployed earlier (they
+# have to be, so Step 2's sound preview has something to play) -- their
+# checkmarks below report on that real, already-completed work via the same
+# Test-Path checks the old, non-wizard "verify" step always used; nothing
+# here re-deploys them or changes when they were written.
+$allOk = $true
+$verifyResults = New-Object System.Collections.Generic.List[PSCustomObject]
+
+function Test-Step {
+    param([string]$Label, [bool]$Condition)
+    $script:verifyResults.Add([PSCustomObject]@{ Label = $Label; Ok = $Condition })
+    if (-not $Condition) { $script:allOk = $false }
+}
+
+function Write-GroupResult {
+    # Prints one checklist line for a group of underlying Test-Step results.
+    # On success: just the summary line, to keep this screen readable. On
+    # failure: the summary line PLUS every failing member's own detail line,
+    # so a real problem is never hidden behind a clean-looking summary.
+    param([string]$GroupLabel, [string[]]$MemberLabels)
+    $members = $verifyResults | Where-Object { $MemberLabels -contains $_.Label }
+    $failing = @($members | Where-Object { -not $_.Ok })
+    if ($failing.Count -eq 0) {
+        Write-Host "  $glyphCheck $GroupLabel" -ForegroundColor Green
+    } else {
+        Write-Host "  $glyphCross $GroupLabel" -ForegroundColor Red
+        foreach ($m in $failing) {
+            Write-Host "      $glyphCross $($m.Label)" -ForegroundColor Red
+        }
+    }
+}
+
+Test-Step "ClaudeAttention.exe deployed"      (Test-Path $exeDeployPath)
+Write-GroupResult "Installing ClaudeAttention" @("ClaudeAttention.exe deployed")
+
+Test-Step "watcher-background.ps1 deployed"   (Test-Path (Join-Path $deployDir 'watcher-background.ps1'))
+Test-Step "test-sound.ps1 deployed"           (Test-Path (Join-Path $deployDir 'test-sound.ps1'))
+foreach ($asset in $soundAssets) {
+    Test-Step "sounds\$($asset.Name) deployed" (Test-Path (Join-Path $soundsDeployDir $asset.Name))
+}
+Test-Step "config.json deployed"              (Test-Path $deployedConfigPath)
+Write-GroupResult "Installing watcher" (@("watcher-background.ps1 deployed", "test-sound.ps1 deployed", "config.json deployed") + @($soundAssets | ForEach-Object { "sounds\$($_.Name) deployed" }))
+
+# --- merge into settings.json (hooks + env), with manifest tracking for the env key ---
 $settings = $null
 if (Test-Path $settingsPath) {
     $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
@@ -389,9 +596,6 @@ foreach ($eventName in $hookCommands.Keys) {
         }
         $settings.hooks.$eventName = @($existingGroups) + $newGroup
         $hooksChanged = $true
-        Write-Host "  added hook: $eventName"
-    } else {
-        Write-Host "  hook already present: $eventName (skipped)"
     }
 }
 
@@ -427,26 +631,45 @@ if ($currentEnvValue -ne $envKeyValue) {
         $settings.env | Add-Member -MemberType NoteProperty -Name $envKeyName -Value $envKeyValue
     }
     $envChanged = $true
-    Write-Host "  set env.$envKeyName = $envKeyValue"
-} else {
-    Write-Host "  env.$envKeyName already = $envKeyValue (skipped)"
 }
 
 if ($hooksChanged -or $envChanged) {
     Backup-FileIfExists $settingsPath
     $settings | ConvertTo-Json -Depth 10 | Set-Content -Path $settingsPath -Encoding utf8
-    Write-Host "  settings.json updated"
-} else {
-    Write-Host "  settings.json already up to date -- no changes made"
 }
 
 # manifest is written/refreshed regardless (safe: history fields are only ever set once)
 $manifest | ConvertTo-Json -Depth 5 | Set-Content -Path $manifestPath -Encoding utf8
-Write-Host ""
 
-# --- 6. add watcher auto-start to $PROFILE ---
-Write-Host "[6/7] Updating PowerShell profile ..." -ForegroundColor Yellow
+$verifySettingsForHooks = Get-Content $settingsPath -Raw | ConvertFrom-Json
+$hooksOk = $true
+foreach ($eventName in $hookCommands.Keys) {
+    $cmd = $hookCommands[$eventName]
+    $found = $false
+    foreach ($group in @($verifySettingsForHooks.hooks.$eventName)) {
+        foreach ($h in @($group.hooks)) {
+            if ($h.command -eq $cmd) { $found = $true }
+        }
+    }
+    if (-not $found) { $hooksOk = $false }
+}
+Test-Step "settings.json contains all 3 hooks" $hooksOk
+Write-GroupResult "Installing hooks" @("settings.json contains all 3 hooks")
 
+# Now that both the sound and emoji choices are final, write config.json once
+# with both fields together -- but only if something actually changed, exactly
+# like the original (pre-wizard) code: an unchanged re-install must leave
+# config.json completely untouched (no rewrite, no touched mtime), not just
+# unchanged in value.
+if ($finalSound -ne $originalSoundValue -or $finalEmoji -ne $originalEmojiValue) {
+    $soundConfig | ConvertTo-Json -Depth 5 | Set-Content -Path $deployedConfigPath -Encoding utf8
+}
+
+$verifySettings = Get-Content $settingsPath -Raw | ConvertFrom-Json
+Test-Step "settings.json env.$envKeyName = $envKeyValue" ($verifySettings.env.$envKeyName -eq $envKeyValue)
+Write-GroupResult "Updating configuration" @("settings.json env.$envKeyName = $envKeyValue")
+
+# --- add watcher auto-start to $PROFILE ---
 $profileBlockLines = @(
     $profileMarkerStart,
     'if (-not $global:ClaudeTabNotifierWatcherStarted) {',
@@ -479,57 +702,34 @@ if (-not $profileHasMarker) {
     } else {
         Add-Content -Path $ProfilePath -Value "`r`n$profileBlock" -Encoding utf8
     }
-    Write-Host "  added watcher auto-start block to `$PROFILE"
-} else {
-    Write-Host "  `$PROFILE already contains the watcher auto-start block (skipped)"
 }
-Write-Host ""
-
-# --- 7. verify ---
-Write-Host "[7/7] Verifying installation ..." -ForegroundColor Yellow
-$allOk = $true
-
-function Test-Step {
-    param([string]$Label, [bool]$Condition)
-    if ($Condition) {
-        Write-Host "  [OK] $Label"
-    } else {
-        Write-Host "  [FAIL] $Label" -ForegroundColor Red
-        $script:allOk = $false
-    }
-}
-
-Test-Step "ClaudeAttention.exe deployed"      (Test-Path $exeDeployPath)
-Test-Step "watcher-background.ps1 deployed"   (Test-Path (Join-Path $deployDir 'watcher-background.ps1'))
-Test-Step "test-sound.ps1 deployed"           (Test-Path (Join-Path $deployDir 'test-sound.ps1'))
-foreach ($asset in $soundAssets) {
-    Test-Step "sounds\$($asset.Name) deployed" (Test-Path (Join-Path $soundsDeployDir $asset.Name))
-}
-Test-Step "config.json deployed"              (Test-Path $deployedConfigPath)
-
-$verifySettings = Get-Content $settingsPath -Raw | ConvertFrom-Json
-$hooksOk = $true
-foreach ($eventName in $hookCommands.Keys) {
-    $cmd = $hookCommands[$eventName]
-    $found = $false
-    foreach ($group in @($verifySettings.hooks.$eventName)) {
-        foreach ($h in @($group.hooks)) {
-            if ($h.command -eq $cmd) { $found = $true }
-        }
-    }
-    if (-not $found) { $hooksOk = $false }
-}
-Test-Step "settings.json contains all 3 hooks" $hooksOk
-Test-Step "settings.json env.$envKeyName = $envKeyValue" ($verifySettings.env.$envKeyName -eq $envKeyValue)
 
 $verifyProfileContent = Get-Content $ProfilePath -Raw
 Test-Step "`$PROFILE contains watcher auto-start block" ($verifyProfileContent -like "*$profileMarkerStart*")
+Write-GroupResult "Configuring PowerShell auto-start" @("`$PROFILE contains watcher auto-start block")
 
-Write-Host ""
+# --- final verification ---
 if ($allOk) {
-    Write-Host "=== Install SUCCEEDED ===" -ForegroundColor Green
+    Write-Host "  $glyphCheck Verifying installation" -ForegroundColor Green
+} else {
+    Write-Host "  $glyphCross Verifying installation" -ForegroundColor Red
+}
+
+if ($allOk) {
+    Write-Banner "$glyphParty ALL DONE!" "Claude Tab Notifier is installed"
+    $soundDisplayName = if ($soundCatalog.Contains($finalSound)) { ($soundCatalog[$finalSound] -split ' -- ')[0] } else { $finalSound }
+    Write-Host "Selected sound: $soundDisplayName"
+    Write-Host "Selected emoji: $($emojiCatalog[$finalEmoji].Name)"
+    Write-Host ""
+    Write-Host "Open a NEW Windows Terminal tab and run:"
+    Write-Host ""
+    Write-Host "    claude" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "You'll see the tab title pulse with your chosen emoji, and hear your"
+    Write-Host "chosen sound, whenever Claude finishes responding or needs your input."
     exit 0
 } else {
-    Write-Host "=== Install FAILED -- see [FAIL] lines above ===" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "=== Install FAILED -- see the details above ===" -ForegroundColor Red
     exit 1
 }

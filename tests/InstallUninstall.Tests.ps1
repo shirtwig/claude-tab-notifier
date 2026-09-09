@@ -596,16 +596,22 @@ Describe "Installer: emoji selection" {
         (Get-DeployedConfig -Sandbox $sandbox).selectedEmoji | Should Be 'sparkle'
     }
 
-    It "interactive: a valid numeric choice selects that emoji (no preview/confirm step)" {
-        # "3" = bell
-        (Invoke-InstallScriptEmojiInteractive -Sandbox $sandbox -InputLines @('3')) | Should Be 0
+    It "interactive: a valid numeric choice, then confirming yes, selects that emoji" {
+        # "3" = bell, "" (blank) = confirm yes
+        (Invoke-InstallScriptEmojiInteractive -Sandbox $sandbox -InputLines @('3', '')) | Should Be 0
         (Get-DeployedConfig -Sandbox $sandbox).selectedEmoji | Should Be 'bell'
     }
 
     It "interactive: an invalid number is rejected and re-prompts instead of crashing" {
-        # "55" invalid -> re-prompted -> "3" = bell
-        (Invoke-InstallScriptEmojiInteractive -Sandbox $sandbox -InputLines @('55', '3')) | Should Be 0
+        # "55" invalid -> re-prompted -> "3" = bell -> "" confirm yes
+        (Invoke-InstallScriptEmojiInteractive -Sandbox $sandbox -InputLines @('55', '3', '')) | Should Be 0
         (Get-DeployedConfig -Sandbox $sandbox).selectedEmoji | Should Be 'bell'
+    }
+
+    It "interactive: answering 'no' to the confirmation re-prompts instead of saving that choice" {
+        # "3" = bell, "n" = reject it, "5" = fire, "" = confirm yes
+        (Invoke-InstallScriptEmojiInteractive -Sandbox $sandbox -InputLines @('3', 'n', '5', '')) | Should Be 0
+        (Get-DeployedConfig -Sandbox $sandbox).selectedEmoji | Should Be 'fire'
     }
 
     It "interactive: pressing Enter with no prior config keeps the sparkle default" {
