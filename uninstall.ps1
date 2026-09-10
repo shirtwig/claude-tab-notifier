@@ -142,6 +142,7 @@ $soundFilesToRemove += (Join-Path $soundsDeployDir 'SOUNDS.md')
 
 $filesToRemove = @(
     (Join-Path $deployDir 'watcher-background.ps1'),
+    (Join-Path $deployDir 'taskbar-badge.ps1'),
     (Join-Path $deployDir 'test-sound.ps1'),
     (Join-Path $deployDir 'config.json'),
     $manifestPath,
@@ -183,6 +184,7 @@ function Test-Step {
 
 Test-Step "ClaudeAttention.exe removed" (-not (Test-Path $exeDeployPath))
 Test-Step "watcher-background.ps1 removed" (-not (Test-Path (Join-Path $deployDir 'watcher-background.ps1')))
+Test-Step "taskbar-badge.ps1 removed" (-not (Test-Path (Join-Path $deployDir 'taskbar-badge.ps1')))
 
 $settingsOk = $true
 if (Test-Path $settingsPath) {

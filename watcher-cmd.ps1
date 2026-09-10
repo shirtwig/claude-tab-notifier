@@ -176,7 +176,24 @@ if ($selectedSound -eq 'custom') {
     $soundFile = Join-Path $PSScriptRoot "sounds\$selectedSound.wav"
 }
 
-Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] CMD watcher started. WT_SESSION=$env:WT_SESSION originalTitle=$originalTitle soundEnabled=$soundEnabled soundFile=$soundFile emojiEnabled=$emojiEnabled"
+# Taskbar attention dot -- see taskbar-badge.ps1 for the full design. No
+# runspace here (this whole watcher is one script-scope loop), so unlike
+# watcher-background.ps1 this only needs to be dot-sourced once.
+$taskbarScriptPath = Join-Path $PSScriptRoot 'taskbar-badge.ps1'
+. $taskbarScriptPath
+try {
+    $taskbarTarget = Resolve-TaskbarWindowTarget
+} catch {
+    $taskbarTarget = [PSCustomObject]@{ Hwnd = $null; Available = $false; Reason = "resolution threw: $($_.Exception.Message)" }
+}
+$taskbarHwnd = if ($taskbarTarget.Available) { $taskbarTarget.Hwnd } else { [IntPtr]::Zero }
+$taskbarDotShown = $false
+# See watcher-background.ps1's identical comment: quarters the taskbar
+# check's I/O by running it every 4th tick (~2s) instead of every tick.
+$taskbarCheckEveryNTicks = 4
+$taskbarTickCounter = 0
+
+Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] CMD watcher started. WT_SESSION=$env:WT_SESSION originalTitle=$originalTitle soundEnabled=$soundEnabled soundFile=$soundFile emojiEnabled=$emojiEnabled taskbarEnabled=$($taskbarTarget.Available) taskbarReason=$($taskbarTarget.Reason)"
 
 $marked = $false
 $lastStatus = $null
@@ -208,6 +225,39 @@ while ($true) {
 
         $heartbeatEntry = @{ time = (Get-Date -Format o); pid = $myPid; parentPid = $myParentPid; shell = 'cmd'; title = $currentTitle }
         ($heartbeatEntry | ConvertTo-Json -Compress) | Set-Content -Path $heartbeatFile -Encoding utf8
+
+        # Taskbar attention dot -- evaluated every Nth tick; see
+        # watcher-background.ps1's identical block for the full rationale
+        # (three separate states never conflated: badge state / session state
+        # / foreground state; edge-triggered to avoid a COM call every tick;
+        # isolated try/catch so a Taskbar API failure never breaks the rest
+        # of this tick's sound/emoji handling below).
+        $taskbarTickCounter++
+        if ($taskbarHwnd -ne [IntPtr]::Zero -and ($taskbarTickCounter % $taskbarCheckEveryNTicks -eq 0)) {
+            try {
+                $taskbarAnyAttention = Test-TaskbarAnyAttention -StateDir $stateDir
+                $taskbarIsForeground = Test-TaskbarIsForeground -Hwnd $taskbarHwnd
+                if ($taskbarAnyAttention -and -not $taskbarDotShown) {
+                    $r = Show-TaskbarAttentionDot -Hwnd $taskbarHwnd
+                    if ($r.Success) {
+                        $taskbarDotShown = $true
+                        Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] TASKBAR SHOW"
+                    } else {
+                        Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] TASKBAR SHOW FAILED: $($r.Error)"
+                    }
+                } elseif ($taskbarIsForeground -and -not $taskbarAnyAttention -and $taskbarDotShown) {
+                    $r = Clear-TaskbarAttentionDot -Hwnd $taskbarHwnd
+                    if ($r.Success) {
+                        $taskbarDotShown = $false
+                        Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] TASKBAR CLEAR"
+                    } else {
+                        Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] TASKBAR CLEAR FAILED: $($r.Error)"
+                    }
+                }
+            } catch {
+                Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] TASKBAR CHECK ERROR: $($_.Exception.Message)"
+            }
+        }
 
         if ($iterationCount % $selfCheckIntervalIterations -eq 0) {
             $parentStillAlive = $null -ne (Get-CimInstance Win32_Process -Filter "ProcessId=$myParentPid" -ErrorAction SilentlyContinue)

@@ -49,6 +49,24 @@ if (Test-Path $configPath) {
     }
 }
 
+# Taskbar attention dot: a single, whole-window badge (never a new taskbar
+# icon, never per-tab) layered on top of everything above -- resolved once at
+# startup, same as $originalTitle. Not gated by any config field: there is no
+# on/off toggle for this, it activates whenever a real, unambiguous target
+# window can be found (see taskbar-badge.ps1's Resolve-TaskbarWindowTarget for
+# the documented cases where it deliberately stays off instead of guessing).
+$taskbarScriptPath = Join-Path $PSScriptRoot 'taskbar-badge.ps1'
+. $taskbarScriptPath
+try {
+    $taskbarTarget = Resolve-TaskbarWindowTarget
+} catch {
+    # Resolution failure (COM unavailable, WMI/CIM access denied, etc.) must
+    # never prevent the watcher from starting or doing its existing
+    # sound/emoji job -- this feature is purely additive.
+    $taskbarTarget = [PSCustomObject]@{ Hwnd = $null; Available = $false; Reason = "resolution threw: $($_.Exception.Message)" }
+}
+$taskbarHwnd = if ($taskbarTarget.Available) { $taskbarTarget.Hwnd } else { [IntPtr]::Zero }
+
 # Emoji catalog: each entry is an ARRAY of Unicode scalar values (almost
 # always just one), built via ConvertFromUtf32 rather than embedding literal
 # glyphs in this source file -- matches the existing "[char]0x2728" pattern
@@ -190,10 +208,11 @@ Write-Host "Watcher log   : $logFile"
 Write-Host "Sound enabled : $soundEnabled"
 Write-Host "Sound file    : $soundFile"
 Write-Host "Emoji enabled : $emojiEnabled"
+Write-Host "Taskbar dot   : $(if ($taskbarTarget.Available) { 'enabled' } else { 'disabled' }) ($($taskbarTarget.Reason))"
 Write-Host ""
 
 $loopScript = {
-    param($stateFile, $originalTitle, $heartbeatFile, $logFile, $soundEnabled, $soundFile, $myPid, $myParentPid, $emojiChar, $emojiEnabled)
+    param($stateFile, $originalTitle, $heartbeatFile, $logFile, $soundEnabled, $soundFile, $myPid, $myParentPid, $emojiChar, $emojiEnabled, $taskbarHwnd, $taskbarScriptPath)
 
     # $Host.UI.RawUI.WindowTitle throws in this background runspace (its default
     # PSHost doesn't implement RawUI -- confirmed via LOOP ERROR log evidence).
@@ -219,6 +238,26 @@ public static extern bool SetConsoleTitleW(string lpConsoleTitle);
             # Logging must never break the actual watcher loop.
         }
     }
+
+    # Functions don't cross the runspace boundary either -- same reason as
+    # Write-WatcherLog above -- so Show-TaskbarAttentionDot/Clear-TaskbarAttentionDot/
+    # Test-TaskbarAnyAttention/Test-TaskbarIsForeground are re-declared here by
+    # dot-sourcing again. Initialize-TaskbarBadgeSupport (called inside this
+    # file) is idempotent, so re-running it is safe even though the .NET type
+    # it defines is already loaded process-wide from the outer scope's earlier call.
+    . $taskbarScriptPath
+    Initialize-TaskbarBadgeSupport
+    $stateDirForTaskbar = Split-Path $stateFile -Parent
+    $taskbarDotShown = $false
+    # The taskbar check does a directory scan (Test-TaskbarAnyAttention) plus
+    # a foreground comparison every time it runs -- cheap on its own, but
+    # multiplied across every concurrent watcher process on every 500ms tick
+    # it measurably adds up (observed while validating this feature under
+    # this suite's multi-process load). A 2s effective cadence is still
+    # imperceptible for a taskbar dot (nobody notices a <=2s delay on an
+    # already-background notification) and quarters that I/O.
+    $taskbarCheckEveryNTicks = 4
+    $taskbarTickCounter = 0
 
     $marked = $false
     $lastStatus = $null
@@ -258,6 +297,50 @@ public static extern bool SetConsoleTitleW(string lpConsoleTitle);
 
             $heartbeatEntry = @{ time = (Get-Date -Format o); pid = $myPid; parentPid = $myParentPid; shell = 'powershell'; title = $currentTitle }
             ($heartbeatEntry | ConvertTo-Json -Compress) | Set-Content -Path $heartbeatFile -Encoding utf8
+
+            # Taskbar attention dot: evaluated every Nth tick (see
+            # $taskbarCheckEveryNTicks above), unconditionally on those ticks
+            # -- it must react to OTHER sessions' state changes and to this
+            # window's own foreground transitions even on ticks where THIS
+            # session's own status doesn't change (the dedup "continue" below
+            # is specific to this session's title/sound bookkeeping only).
+            # Three separate, never-conflated pieces of state feed this:
+            #   1. taskbar badge state    -- $taskbarDotShown (local to this loop)
+            #   2. session state          -- Test-TaskbarAnyAttention (reads the
+            #                                same per-session files the pulse/sound
+            #                                logic already reads; introduces no new file)
+            #   3. foreground/seen state  -- Test-TaskbarIsForeground (GetForegroundWindow())
+            # Edge-triggered (only calls the COM API on an actual transition) to
+            # avoid a COM round-trip every tick while attention is showing.
+            # Wrapped in its own try/catch so any Taskbar API failure is logged
+            # and skipped, never escaping to the outer catch where it could
+            # interrupt this tick's sound/emoji handling below.
+            $taskbarTickCounter++
+            if ($taskbarHwnd -ne [IntPtr]::Zero -and ($taskbarTickCounter % $taskbarCheckEveryNTicks -eq 0)) {
+                try {
+                    $taskbarAnyAttention = Test-TaskbarAnyAttention -StateDir $stateDirForTaskbar
+                    $taskbarIsForeground = Test-TaskbarIsForeground -Hwnd $taskbarHwnd
+                    if ($taskbarAnyAttention -and -not $taskbarDotShown) {
+                        $r = Show-TaskbarAttentionDot -Hwnd $taskbarHwnd
+                        if ($r.Success) {
+                            $taskbarDotShown = $true
+                            Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] TASKBAR SHOW"
+                        } else {
+                            Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] TASKBAR SHOW FAILED: $($r.Error)"
+                        }
+                    } elseif ($taskbarIsForeground -and -not $taskbarAnyAttention -and $taskbarDotShown) {
+                        $r = Clear-TaskbarAttentionDot -Hwnd $taskbarHwnd
+                        if ($r.Success) {
+                            $taskbarDotShown = $false
+                            Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] TASKBAR CLEAR"
+                        } else {
+                            Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] TASKBAR CLEAR FAILED: $($r.Error)"
+                        }
+                    }
+                } catch {
+                    Write-WatcherLog -LogPath $logFile -Message "[$(Get-Date -Format T)] TASKBAR CHECK ERROR: $($_.Exception.Message)"
+                }
+            }
 
             $exists = Test-Path $stateFile
             $status = 'clear'
@@ -339,7 +422,7 @@ $runspace.Open()
 
 $ps = [powershell]::Create()
 $ps.Runspace = $runspace
-[void]$ps.AddScript($loopScript).AddArgument($stateFile).AddArgument($originalTitle).AddArgument($heartbeatFile).AddArgument($logFile).AddArgument($soundEnabled).AddArgument($soundFile).AddArgument($myPid).AddArgument($myParentPid).AddArgument($emojiChar).AddArgument($emojiEnabled)
+[void]$ps.AddScript($loopScript).AddArgument($stateFile).AddArgument($originalTitle).AddArgument($heartbeatFile).AddArgument($logFile).AddArgument($soundEnabled).AddArgument($soundFile).AddArgument($myPid).AddArgument($myParentPid).AddArgument($emojiChar).AddArgument($emojiEnabled).AddArgument($taskbarHwnd).AddArgument($taskbarScriptPath)
 
 $null = $ps.BeginInvoke()
 

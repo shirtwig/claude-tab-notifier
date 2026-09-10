@@ -53,8 +53,8 @@ function ConvertTo-QuotedArgString {
 
 function New-StagedInstallScript {
     # Simulates a real "downloaded GitHub ZIP" install: copies install.ps1
-    # and everything it deploys (watcher-background.ps1, test-sound.ps1,
-    # sounds\, config.json) into an isolated staging directory. install.ps1
+    # and everything it deploys (watcher-background.ps1, taskbar-badge.ps1,
+    # test-sound.ps1, sounds\, config.json) into an isolated staging directory. install.ps1
     # locates all of these via $PSScriptRoot, which resolves to wherever the
     # invoked script FILE itself lives -- so running this staged copy makes
     # its Copy-Item calls read from these staged (taggable) sources instead
@@ -66,6 +66,7 @@ function New-StagedInstallScript {
     New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
     Copy-Item -Path $installScript -Destination (Join-Path $stageDir 'install.ps1') -Force
     Copy-Item -Path (Join-Path $projectRoot 'watcher-background.ps1') -Destination (Join-Path $stageDir 'watcher-background.ps1') -Force
+    Copy-Item -Path (Join-Path $projectRoot 'taskbar-badge.ps1') -Destination (Join-Path $stageDir 'taskbar-badge.ps1') -Force
     Copy-Item -Path (Join-Path $projectRoot 'test-sound.ps1') -Destination (Join-Path $stageDir 'test-sound.ps1') -Force
     Copy-Item -Path (Join-Path $projectRoot 'config.json') -Destination (Join-Path $stageDir 'config.json') -Force
     Copy-Item -Path (Join-Path $projectRoot 'sounds') -Destination (Join-Path $stageDir 'sounds') -Recurse -Force

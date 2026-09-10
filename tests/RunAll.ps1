@@ -14,7 +14,8 @@ $testFiles = @(
     'OrphanCleanup.Tests.ps1',
     'ConcurrentSessions.Tests.ps1',
     'LogRotation.Tests.ps1',
-    'InstallUninstall.Tests.ps1'
+    'InstallUninstall.Tests.ps1',
+    'TaskbarBadge.Tests.ps1'
 )
 
 $results = @()

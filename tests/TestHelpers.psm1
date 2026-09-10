@@ -23,6 +23,7 @@ function New-TestSandbox {
 
     Copy-Item -Path (Join-Path $script:ProjectRoot 'watcher-background.ps1') -Destination $scriptsDir -Force
     Copy-Item -Path (Join-Path $script:ProjectRoot 'watcher-cmd.ps1') -Destination $scriptsDir -Force
+    Copy-Item -Path (Join-Path $script:ProjectRoot 'taskbar-badge.ps1') -Destination $scriptsDir -Force
     Copy-Item -Path (Join-Path $script:ProjectRoot 'sounds\*.wav') -Destination $soundsDir -Force
     Copy-Item -Path (Join-Path $script:ProjectRoot 'config.json') -Destination $scriptsDir -Force
 
@@ -78,16 +79,18 @@ function Start-IsolatedProcess {
 }
 
 function Start-IsolatedPsWatcher {
-    param($Sandbox, [string]$WtSession)
+    param($Sandbox, [string]$WtSession, [hashtable]$ExtraEnv = @{})
+    $envOverrides = @{ WT_SESSION = $WtSession; LOCALAPPDATA = $Sandbox.LocalAppData }
+    foreach ($key in $ExtraEnv.Keys) { $envOverrides[$key] = $ExtraEnv[$key] }
     $proc = Start-IsolatedProcess -FileName 'powershell.exe' `
         -Arguments "-NoProfile -NoExit -Command `"& '$($Sandbox.PsWatcher)'`"" `
-        -EnvOverrides @{ WT_SESSION = $WtSession; LOCALAPPDATA = $Sandbox.LocalAppData }
+        -EnvOverrides $envOverrides
     $Sandbox.TrackedPids.Add($proc.Id)
     return $proc
 }
 
 function Start-IsolatedCmdWatcher {
-    param($Sandbox, [string]$WtSession)
+    param($Sandbox, [string]$WtSession, [hashtable]$ExtraEnv = @{})
 
     # A tiny disposable launcher file, mirroring the real watcher-cmd.cmd pattern
     # (start /B, then stay alive) -- avoids nested-quoting issues with inline
@@ -106,9 +109,11 @@ ping -n 2 127.0.0.1 >nul
 goto loop
 "@ | Set-Content -Path $launcherPath -Encoding ASCII
 
+    $envOverrides = @{ WT_SESSION = $WtSession; LOCALAPPDATA = $Sandbox.LocalAppData }
+    foreach ($key in $ExtraEnv.Keys) { $envOverrides[$key] = $ExtraEnv[$key] }
     $fakeParent = Start-IsolatedProcess -FileName 'cmd.exe' `
         -Arguments "/c `"$launcherPath`"" `
-        -EnvOverrides @{ WT_SESSION = $WtSession; LOCALAPPDATA = $Sandbox.LocalAppData }
+        -EnvOverrides $envOverrides
     $Sandbox.TrackedPids.Add($fakeParent.Id)
     return $fakeParent
 }

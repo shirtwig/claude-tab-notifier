@@ -223,6 +223,7 @@ if ($SourceExePath) {
 New-Item -ItemType Directory -Path $soundsDeployDir -Force | Out-Null
 
 Copy-Item -Path (Join-Path $PSScriptRoot 'watcher-background.ps1') -Destination (Join-Path $deployDir 'watcher-background.ps1') -Force
+Copy-Item -Path (Join-Path $PSScriptRoot 'taskbar-badge.ps1')      -Destination (Join-Path $deployDir 'taskbar-badge.ps1') -Force
 Copy-Item -Path (Join-Path $PSScriptRoot 'test-sound.ps1')         -Destination (Join-Path $deployDir 'test-sound.ps1') -Force
 
 $soundsSourceDir = Join-Path $PSScriptRoot 'sounds'
@@ -617,12 +618,13 @@ Test-Step "ClaudeAttention.exe deployed"      (Test-Path $exeDeployPath)
 Write-GroupResult "Installing ClaudeAttention" @("ClaudeAttention.exe deployed")
 
 Test-Step "watcher-background.ps1 deployed"   (Test-Path (Join-Path $deployDir 'watcher-background.ps1'))
+Test-Step "taskbar-badge.ps1 deployed"        (Test-Path (Join-Path $deployDir 'taskbar-badge.ps1'))
 Test-Step "test-sound.ps1 deployed"           (Test-Path (Join-Path $deployDir 'test-sound.ps1'))
 foreach ($asset in $soundAssets) {
     Test-Step "sounds\$($asset.Name) deployed" (Test-Path (Join-Path $soundsDeployDir $asset.Name))
 }
 Test-Step "config.json deployed"              (Test-Path $deployedConfigPath)
-Write-GroupResult "Installing watcher" (@("watcher-background.ps1 deployed", "test-sound.ps1 deployed", "config.json deployed") + @($soundAssets | ForEach-Object { "sounds\$($_.Name) deployed" }))
+Write-GroupResult "Installing watcher" (@("watcher-background.ps1 deployed", "taskbar-badge.ps1 deployed", "test-sound.ps1 deployed", "config.json deployed") + @($soundAssets | ForEach-Object { "sounds\$($_.Name) deployed" }))
 
 # --- merge into settings.json (hooks + env), with manifest tracking for the env key ---
 $settings = $null
